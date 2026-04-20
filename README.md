@@ -75,4 +75,4 @@ Run the smoke test with:
 npm test
 ```
 
-This invokes `node --test`, which discovers and executes files under `test/`. The test boots the server on an ephemeral port, issues a `GET /hello` request, asserts that the response status is `200` and the body equals `Hello world`, then cleanly shuts the server down. The test relies solely on Node.js built-ins (`node:test`, `node:assert/strict`, `node:http`) — there are zero external test framework dependencies.
+This invokes `node --test`, which discovers and executes files under `test/`. The test spawns `server.js` as a subprocess on port `3001` (by overriding the `PORT` environment variable), issues a `GET /hello` request, asserts that the response status is `200`, the body equals `Hello world`, and the `Content-Type` header includes `text/plain`, then cleanly terminates the subprocess with `SIGTERM`. The test relies solely on Node.js built-ins (`node:test`, `node:assert/strict`, `node:http`) — there are zero external test framework dependencies.
