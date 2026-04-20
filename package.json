@@ -1,0 +1,17 @@
+{
+  "name": "20april_-",
+  "version": "1.0.0",
+  "description": "A minimal Node.js tutorial project exposing a single GET /hello endpoint that returns the literal string Hello world.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "express": "^5.1.0"
+  }
+}
