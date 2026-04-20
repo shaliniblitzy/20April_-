@@ -1,7 +1,7 @@
 {
   "name": "20april_-",
   "version": "1.0.0",
-  "description": "A minimal Node.js tutorial project exposing a single GET /hello endpoint that returns the literal string Hello world.",
+  "description": "Minimal Node.js + Express tutorial project exposing a GET /hello endpoint that returns the plain-text body 'Hello world'.",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
