@@ -1,0 +1,16 @@
+{
+  "name": "express-hello-world-tutorial",
+  "version": "1.0.0",
+  "description": "A minimal Express.js HTTP server with two greeting endpoints.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^5.2.1"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "license": "ISC"
+}
