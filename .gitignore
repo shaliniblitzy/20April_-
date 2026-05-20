@@ -1,69 +1,155 @@
-# --- Python ---
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
+# =============================================================================
+# .gitignore for the 20April_- Flask scaffold
+#
+# Scope: Python 3.10+ / Flask 3.1.x / gunicorn 26.x application.
+# See AAP §0.4.1 for the mandated minimum pattern set.
+#
+# Patterns are grouped into thematic sections matching AAP §0.4.1 Phase 1–10.
+# Each pattern lives on its own line. Trailing slashes mark directory-only
+# matches. Leading slashes anchor a pattern to the repository root.
+# Negations (lines beginning with `!`) re-include a previously excluded path.
+#
+# IMPORTANT — environment-variable contract:
+#   `.env` is the real (per-machine, secret-bearing) environment file and is
+#   ALWAYS ignored. `.env.example` is the committed contract template and is
+#   NEVER matched by any pattern in this file.
+# =============================================================================
 
-# --- Distribution / packaging ---
+
+# -----------------------------------------------------------------------------
+# Phase 1 — Byte-compiled / optimized / DLL files
+# -----------------------------------------------------------------------------
+# Python bytecode caches generated on import. Recreated automatically.
+__pycache__/
+# Covers *.pyc (compiled), *.pyo (optimized — pre-3.5 layout), *.pyd (Windows).
+*.py[cod]
+# Jython class files emitted alongside .py sources.
+*$py.class
+
+
+# -----------------------------------------------------------------------------
+# Phase 2 — Distribution / packaging
+# -----------------------------------------------------------------------------
+# Artifacts produced by `python -m build`, `pip wheel`, setuptools, etc.
 build/
 dist/
 *.egg-info/
 *.egg
 .eggs/
+wheels/
 pip-wheel-metadata/
 share/python-wheels/
 MANIFEST
 
-# --- Virtual environments ---
+
+# -----------------------------------------------------------------------------
+# Phase 3 — Virtual environments
+# -----------------------------------------------------------------------------
+# Local virtualenvs and their common aliases. Never commit a venv directory —
+# dependencies are reproduced from requirements*.txt / pyproject.toml.
 .venv/
 venv/
-env/
 ENV/
-env.bak/
-venv.bak/
+env/
+# pyenv local-version pin (per-machine; should not be committed).
+.python-version
 
-# --- Environment / secrets ---
-.env
-.env.*
-!.env.example
 
-# --- Test, coverage, cache ---
+# -----------------------------------------------------------------------------
+# Phase 4 — Test / coverage caches
+# -----------------------------------------------------------------------------
+# pytest scratch directory.
 .pytest_cache/
+# Generic stdlib cache directory (shutil/joblib/etc.).
+.cache/
+# coverage.py HTML report output.
+htmlcov/
+# coverage.py data files (single-process and combined).
 .coverage
 .coverage.*
-htmlcov/
-.tox/
-.nox/
-.cache/
-nosetests.xml
+# Cobertura-style coverage XML (CI consumers).
 coverage.xml
+# Per-file coverage annotation output.
 *.cover
-*.py,cover
+# Hypothesis property-based-testing database.
 .hypothesis/
+# tox multi-environment runner workspace.
+.tox/
+# nose legacy test runner XML output.
+nosetests.xml
 
-# --- Linter / type-checker caches ---
+
+# -----------------------------------------------------------------------------
+# Phase 5 — Lint / type-check caches
+# -----------------------------------------------------------------------------
+# ruff lint+format cache (requirements-dev.txt pins ruff).
 .ruff_cache/
+# mypy incremental cache (requirements-dev.txt pins mypy).
 .mypy_cache/
+# dmypy daemon state files.
 .dmypy.json
 dmypy.json
+# Meta's pyre type-checker cache.
 .pyre/
+# Google's pytype type-checker cache.
 .pytype/
 
-# --- IDEs / editors ---
-.idea/
+
+# -----------------------------------------------------------------------------
+# Phase 6 — Environment / secrets
+# -----------------------------------------------------------------------------
+# The real environment file (SECRET_KEY, credentials, etc.). NEVER commit.
+.env
+# Common per-developer overrides.
+.env.local
+# Per-environment local overrides (e.g., .env.development.local).
+.env.*.local
+# NOTE: `.env.example` is the committed env-var contract template and is NOT
+# matched by any pattern above — it remains tracked by git.
+
+
+# -----------------------------------------------------------------------------
+# Phase 7 — IDE / editor artifacts
+# -----------------------------------------------------------------------------
+# Visual Studio Code workspace settings.
 .vscode/
-*.swp
-*.swo
-*~
+# JetBrains IDEs (PyCharm, IntelliJ).
+.idea/
+# Sublime Text project files.
+*.sublime-project
+*.sublime-workspace
+# Spyder IDE project files.
+.spyderproject
+.spyproject
+# Rope refactoring library project metadata.
+.ropeproject
+
+
+# -----------------------------------------------------------------------------
+# Phase 8 — OS-specific
+# -----------------------------------------------------------------------------
+# macOS Finder metadata.
 .DS_Store
+# Windows Explorer thumbnail cache.
+Thumbs.db
+# Windows folder customisation metadata.
+desktop.ini
 
-# --- Logs / runtime ---
+
+# -----------------------------------------------------------------------------
+# Phase 9 — Flask / application artifacts
+# -----------------------------------------------------------------------------
+# Flask instance folder — holds per-deployment config and SQLite databases.
+instance/
+# Stray application log files (gunicorn/Werkzeug/app loggers).
 *.log
-logs/
-pip-log.txt
-pip-delete-this-directory.txt
 
-# --- Misc ---
-*.pid
-*.sqlite3
-*.db
+
+# -----------------------------------------------------------------------------
+# Phase 10 — Documentation build (defensive)
+# -----------------------------------------------------------------------------
+# Sphinx default build output.
+docs/_build/
+# mkdocs default build output (anchored to repo root so subdir `site/`
+# directories elsewhere are not unintentionally ignored).
+/site/
