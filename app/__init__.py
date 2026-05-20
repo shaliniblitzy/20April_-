@@ -138,48 +138,23 @@ import os
 # minimal and the dependency on Flask explicit.
 from flask import Flask
 
-# ---------------------------------------------------------------------------
-# First-party
-# ---------------------------------------------------------------------------
-# First-party imports are sorted alphabetically by ruff/isort. The order
-# in this block (``app.blueprints.*`` first, then ``app.config``,
-# ``app.errors``, ``app.logging_config``) is the canonical isort
-# ordering and does NOT reflect call/registration order inside
-# :func:`create_app` — see the function body below for the AAP-mandated
-# ``configure_logging → register_error_handlers → register_blueprint``
-# sequence.
+# =============================================================================
+# Module-level constants — DEFINED BEFORE BLUEPRINT IMPORTS
+# =============================================================================
+# CRITICAL ORDERING NOTE
+# ----------------------
+# :data:`__version__` MUST be defined BEFORE any blueprint import below,
+# because importing :mod:`app.blueprints.main` transitively imports
+# :mod:`app.blueprints.main.routes`, which in turn executes
+# ``from app import __version__ as APP_VERSION`` at module load time.
+# If ``__version__`` is not yet bound on the partially-initialised
+# :mod:`app` package when that line runs, the import raises
+# :class:`ImportError` and ``main/routes.py`` silently falls back to a
+# hardcoded ``"0.1.0"`` literal — a stale-version drift bug that the
+# Checkpoint 2 review flagged as MAJOR. Keeping the constant above the
+# blueprint imports guarantees the canonical :data:`app.__version__` is
+# the single source of truth for the ``GET /version`` endpoint.
 #
-# Blueprint singletons. Each is imported explicitly by name (not via a
-# loop) so the import graph remains tractable for static analysis tools
-# (mypy, ruff, IDE jump-to-definition). The Blueprint instances are
-# defined at module scope in their respective package initializers and
-# are mounted onto the Flask application inside :func:`create_app` via
-# :meth:`flask.Flask.register_blueprint`.
-from app.blueprints.api import api_bp
-from app.blueprints.health import health_bp
-from app.blueprints.main import main_bp
-
-# Configuration selection map. ``config_by_name`` is a ``dict[str,
-# type[BaseConfig]]`` whose keys are the documented profile names
-# (``development``, ``production``, ``testing``, ``default``) and whose
-# values are configuration class objects (NOT instances). The class
-# object is passed to :meth:`flask.Config.from_object` which iterates
-# the class's uppercase attributes to populate ``app.config``.
-from app.config import config_by_name
-
-# Centralized HTTP error-handler registration. Called once during factory
-# execution to attach the standard JSON error envelope to every error
-# code (400, 404, 405, 500) and to the ``HTTPException`` catch-all.
-from app.errors import register_error_handlers
-
-# Process-wide logging configuration. Called BEFORE any other log line is
-# emitted (including the startup confirmation in this module) so the
-# resulting log stream is uniformly formatted from the very first record.
-from app.logging_config import configure_logging
-
-# =============================================================================
-# Module-level constants
-# =============================================================================
 # The scaffold's distribution version. Mirrored from ``[project].version``
 # in ``pyproject.toml``. This constant is imported by
 # :mod:`app.blueprints.main.routes` to power the ``GET /version`` endpoint,
@@ -199,6 +174,59 @@ __version__: str = "0.1.0"
 # production would silently enable the interactive debugger (see
 # :class:`app.config.DevelopmentConfig`).
 DEFAULT_CONFIG: str = "development"
+
+# ---------------------------------------------------------------------------
+# First-party
+# ---------------------------------------------------------------------------
+# First-party imports are sorted alphabetically by ruff/isort. The order
+# in this block (``app.blueprints.*`` first, then ``app.config``,
+# ``app.errors``, ``app.logging_config``) is the canonical isort
+# ordering and does NOT reflect call/registration order inside
+# :func:`create_app` — see the function body below for the AAP-mandated
+# ``configure_logging → register_error_handlers → register_blueprint``
+# sequence.
+#
+# Blueprint singletons. Each is imported explicitly by name (not via a
+# loop) so the import graph remains tractable for static analysis tools
+# (mypy, ruff, IDE jump-to-definition). The Blueprint instances are
+# defined at module scope in their respective package initializers and
+# are mounted onto the Flask application inside :func:`create_app` via
+# :meth:`flask.Flask.register_blueprint`.
+#
+# Lint suppression rationale
+# --------------------------
+# ``E402`` ("module-level import not at top of file") would normally
+# flag the blueprint imports below because they appear AFTER the
+# :data:`__version__` and :data:`DEFAULT_CONFIG` constant assignments
+# above. The placement of ``__version__`` above these imports is
+# REQUIRED for runtime correctness (see the ordering note above and the
+# Checkpoint 2 review finding MAJOR/__init__.py); the lint rule cannot
+# express that requirement, so we suppress it on the lines that carry
+# the constraint. The non-blueprint first-party imports
+# (``config_by_name``, ``register_error_handlers``, ``configure_logging``)
+# do not trigger circular imports back into :mod:`app`, but receive the
+# same suppression for stylistic consistency within this import block.
+from app.blueprints.api import api_bp  # noqa: E402
+from app.blueprints.health import health_bp  # noqa: E402
+from app.blueprints.main import main_bp  # noqa: E402
+
+# Configuration selection map. ``config_by_name`` is a ``dict[str,
+# type[BaseConfig]]`` whose keys are the documented profile names
+# (``development``, ``production``, ``testing``, ``default``) and whose
+# values are configuration class objects (NOT instances). The class
+# object is passed to :meth:`flask.Config.from_object` which iterates
+# the class's uppercase attributes to populate ``app.config``.
+from app.config import config_by_name  # noqa: E402
+
+# Centralized HTTP error-handler registration. Called once during factory
+# execution to attach the standard JSON error envelope to every error
+# code (400, 404, 405, 500) and to the ``HTTPException`` catch-all.
+from app.errors import register_error_handlers  # noqa: E402
+
+# Process-wide logging configuration. Called BEFORE any other log line is
+# emitted (including the startup confirmation in this module) so the
+# resulting log stream is uniformly formatted from the very first record.
+from app.logging_config import configure_logging  # noqa: E402
 
 
 # =============================================================================

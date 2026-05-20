@@ -190,12 +190,18 @@ The Blueprint hosts:
 #     ``F401`` in ``__init__.py`` modules, but the explicit ``noqa``
 #     keeps the intent legible without relying on that global rule.
 #
-# The absolute import form (``from app.blueprints.main import routes``)
-# is preferred over the relative form (``from . import routes``) for
-# consistency with the absolute-import convention used elsewhere in the
-# scaffold and for clarity in IDE jump-to-definition operations. Both
-# forms produce identical runtime behaviour.
-from app.blueprints.main import routes  # noqa: E402, F401
+# The relative import form (``from . import routes``) is used here per
+# the checkpoint-prescribed blueprint-initializer pattern (see the
+# Checkpoint 2 review finding MINOR/main-init). The relative form is
+# the canonical Flask-tutorial idiom for blueprint package initializers
+# because it makes the intra-package side-effect explicit: the
+# ``routes`` module lives in the SAME package as this initializer and
+# is imported solely to trigger its decorator-based route-registration
+# side effects. The absolute form ``from app.blueprints.main import
+# routes`` produces identical runtime behaviour but obscures the
+# intra-package relationship; the relative form keeps the import
+# graph's locality visible in a single line.
+from . import routes  # noqa: E402, F401
 
 # =============================================================================
 # Public API declaration

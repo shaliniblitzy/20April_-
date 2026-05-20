@@ -50,13 +50,13 @@ References
 
 from __future__ import annotations
 
-from flask import jsonify
+from flask import Response, jsonify
 
 from app.blueprints.health import health_bp
 
 
 @health_bp.get("/healthz")
-def healthz():
+def healthz() -> Response:
     """Liveness probe endpoint.
 
     Returns a static JSON envelope confirming the Python process is
@@ -72,13 +72,20 @@ def healthz():
     Returns:
         A :class:`flask.Response` carrying the JSON body
         ``{"status": "ok"}`` with HTTP status 200 (Flask default for
-        :func:`flask.jsonify` responses).
+        :func:`flask.jsonify` responses). The explicit
+        :class:`flask.Response` return annotation (rather than a looser
+        :data:`~flask.typing.ResponseReturnValue` union) documents that
+        this handler always returns the concrete
+        :class:`flask.Response` object produced by :func:`flask.jsonify`
+        and never a ``(body, status)`` tuple or bare string — useful
+        signal for static analysers and for human reviewers
+        cross-referencing the endpoint contract.
     """
     return jsonify({"status": "ok"})
 
 
 @health_bp.get("/readyz")
-def readyz():
+def readyz() -> Response:
     """Readiness probe endpoint.
 
     Returns a static JSON envelope confirming the service is ready to
@@ -96,6 +103,9 @@ def readyz():
     Returns:
         A :class:`flask.Response` carrying the JSON body
         ``{"status": "ready"}`` with HTTP status 200 (Flask default
-        for :func:`flask.jsonify` responses).
+        for :func:`flask.jsonify` responses). The explicit
+        :class:`flask.Response` return annotation matches the sibling
+        :func:`healthz` handler so the probe pair has a uniform typed
+        signature for static analysers and reviewers.
     """
     return jsonify({"status": "ready"})

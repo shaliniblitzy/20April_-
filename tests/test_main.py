@@ -22,6 +22,31 @@ fixture yields a configured :class:`flask.Flask` instance built via the
 application factory under the ``TestingConfig`` profile
 (``TESTING=True``), ensuring hermetic, order-independent test runs.
 
+Type-checking imports
+---------------------
+The :class:`flask.Flask` and :class:`flask.testing.FlaskClient` types
+are imported under a :data:`typing.TYPE_CHECKING` guard so they are
+available to static type-checkers (mypy) without being loaded at
+runtime. This is the checkpoint-prescribed pattern for fixture-only
+type annotations: pytest's parameter-injection mechanism does not
+introspect annotations at import time, so the types need not be
+present at runtime — but the annotations remain machine-readable for
+IDEs and type-checkers.
+
+Test structure
+--------------
+Tests are split into focused per-key/per-assertion functions rather
+than aggregating multiple assertions into one omnibus test. This
+granularity:
+
+* Surfaces the exact key/assertion that failed in pytest's report,
+  rather than a single "envelope shape" failure that requires reading
+  the assertion body to diagnose.
+* Lets the suite be filtered with ``pytest -k <name>`` to target a
+  specific contract dimension during local debugging.
+* Mirrors the per-key contract structure documented in AAP §0.4.1 and
+  in the Checkpoint 2 review's prescribed skeleton.
+
 Design intent
 -------------
 These tests are written defensively against the (currently absent)
@@ -49,8 +74,20 @@ References
 
 from __future__ import annotations
 
-from flask import Flask
-from flask.testing import FlaskClient
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    # Imports gated by TYPE_CHECKING are evaluated by static type-checkers
+    # (mypy) but skipped at runtime — they exist solely to give pytest
+    # fixture parameters (``app: Flask``, ``client: FlaskClient``) typed
+    # annotations without forcing the costlier ``flask.testing`` import at
+    # test-collection time. ``from __future__ import annotations`` (above)
+    # makes ALL annotations strings at runtime, so these names need only
+    # resolve during static analysis. This is the checkpoint-prescribed
+    # pattern for fixture-only type annotations.
+    from flask import Flask
+    from flask.testing import FlaskClient
+
 
 # =============================================================================
 # Tests for ``GET /`` (service banner)
@@ -66,8 +103,12 @@ from flask.testing import FlaskClient
 #     by the scaffold (``/healthz``, ``/readyz``, ``/version``, ``/api/``)
 #     so operators discover them from a single request to the root.
 #
-# Tests assert structural properties only; exact string values are left
-# unconstrained to tolerate non-breaking wording revisions.
+# Each property is asserted by its own focused test function so the
+# pytest report points directly to the failing key/dimension without
+# requiring inspection of an omnibus assertion body. Exact string values
+# (e.g., ``service`` text, ``message`` wording) are deliberately NOT
+# pinned to tolerate non-breaking wording revisions and to preserve
+# portability when the Node.js source is eventually ported.
 
 
 def test_index_returns_200(client: FlaskClient) -> None:
@@ -86,7 +127,7 @@ def test_index_returns_200(client: FlaskClient) -> None:
     )
 
 
-def test_index_returns_json_content_type(client: FlaskClient) -> None:
+def test_index_content_type_is_json(client: FlaskClient) -> None:
     """Verify ``GET /`` returns ``Content-Type: application/json``.
 
     The Flask :class:`~flask.Response` object exposes:
@@ -110,22 +151,15 @@ def test_index_returns_json_content_type(client: FlaskClient) -> None:
     )
 
 
-def test_index_envelope_shape(client: FlaskClient) -> None:
-    """Verify ``GET /`` body has the required keys ``service``, ``message``, ``endpoints``.
+def test_index_envelope_has_service_key(client: FlaskClient) -> None:
+    """Verify ``GET /`` body includes a non-empty ``service`` string.
 
-    Expected JSON envelope shape::
-
-        {
-            "service":   <non-empty string>,
-            "message":   <non-empty string>,
-            "endpoints": <non-empty list>,
-        }
-
-    The exact string values for ``service`` and ``message`` are not
-    pinned here — the routes-module agent prompt explicitly permits
-    minor wording variations. Tests therefore assert presence and type
-    only; the more specific endpoint-list assertion lives in
-    :func:`test_index_endpoints_list_includes_expected_paths`.
+    The ``service`` key carries the human-readable identifier of the
+    running scaffold. The exact string value is intentionally NOT
+    pinned (per AAP §0.7.2 portability rules) — only its presence,
+    type, and non-emptiness are asserted so the test remains green
+    when the upstream Node.js source is ported and brings its own
+    canonical service name.
     """
     response = client.get("/")
     data = response.get_json()
@@ -134,30 +168,57 @@ def test_index_envelope_shape(client: FlaskClient) -> None:
         f"Expected JSON object (dict) at GET /, got {type(data).__name__}: {data!r}"
     )
     assert "service" in data, f"Missing 'service' key in GET / body: {data!r}"
-    assert "message" in data, f"Missing 'message' key in GET / body: {data!r}"
-    assert "endpoints" in data, f"Missing 'endpoints' key in GET / body: {data!r}"
-
-    # ``service`` must be a non-empty string identifying the service.
     assert isinstance(data["service"], str), (
         f"'service' must be a string, got {type(data['service']).__name__}"
     )
     assert len(data["service"]) > 0, "'service' must be a non-empty string"
 
-    # ``message`` must be a non-empty string describing the service.
+
+def test_index_envelope_has_message_key(client: FlaskClient) -> None:
+    """Verify ``GET /`` body includes a non-empty ``message`` string.
+
+    The ``message`` key carries a brief description of the running
+    scaffold. The exact string value is intentionally NOT pinned (per
+    AAP §0.7.2 portability rules) — only its presence, type, and
+    non-emptiness are asserted so the test remains green across
+    non-breaking wording revisions.
+    """
+    response = client.get("/")
+    data = response.get_json()
+
+    assert isinstance(data, dict), (
+        f"Expected JSON object (dict) at GET /, got {type(data).__name__}: {data!r}"
+    )
+    assert "message" in data, f"Missing 'message' key in GET / body: {data!r}"
     assert isinstance(data["message"], str), (
         f"'message' must be a string, got {type(data['message']).__name__}"
     )
     assert len(data["message"]) > 0, "'message' must be a non-empty string"
 
-    # ``endpoints`` must be a non-empty list of path strings (further
-    # subset checks are performed in the next test).
+
+def test_index_envelope_has_endpoints_key(client: FlaskClient) -> None:
+    """Verify ``GET /`` body includes a non-empty ``endpoints`` list.
+
+    The ``endpoints`` key carries a list of helper paths advertised
+    by the scaffold. This test asserts only the structural properties
+    (presence, list type, non-emptiness); the specific paths the list
+    must contain are exercised by
+    :func:`test_index_endpoints_includes_expected_paths` below.
+    """
+    response = client.get("/")
+    data = response.get_json()
+
+    assert isinstance(data, dict), (
+        f"Expected JSON object (dict) at GET /, got {type(data).__name__}: {data!r}"
+    )
+    assert "endpoints" in data, f"Missing 'endpoints' key in GET / body: {data!r}"
     assert isinstance(data["endpoints"], list), (
         f"'endpoints' must be a list, got {type(data['endpoints']).__name__}"
     )
     assert len(data["endpoints"]) > 0, "'endpoints' list must not be empty"
 
 
-def test_index_endpoints_list_includes_expected_paths(client: FlaskClient) -> None:
+def test_index_endpoints_includes_expected_paths(client: FlaskClient) -> None:
     """Verify the ``endpoints`` list documents the helper paths.
 
     The index banner must advertise the helper routes the rest of the
@@ -228,10 +289,10 @@ def test_version_returns_200(client: FlaskClient) -> None:
     )
 
 
-def test_version_returns_json_content_type(client: FlaskClient) -> None:
+def test_version_content_type_is_json(client: FlaskClient) -> None:
     """Verify ``GET /version`` returns ``Content-Type: application/json``.
 
-    Mirrors :func:`test_index_returns_json_content_type` — both
+    Mirrors :func:`test_index_content_type_is_json` — both
     handlers must return JSON via :func:`flask.jsonify`, which sets
     the canonical ``application/json`` content type.
     """
@@ -244,7 +305,7 @@ def test_version_returns_json_content_type(client: FlaskClient) -> None:
     )
 
 
-def test_version_has_expected_keys(client: FlaskClient) -> None:
+def test_version_has_required_keys(client: FlaskClient) -> None:
     """Verify ``GET /version`` body has the required keys ``name``, ``version``, ``python``.
 
     Expected JSON envelope shape per AAP §0.4.1::
@@ -256,11 +317,11 @@ def test_version_has_expected_keys(client: FlaskClient) -> None:
         }
 
     Exact string values are not pinned: ``version`` will bump as the
-    project evolves (per :attr:`app.config.BaseConfig.APP_VERSION` and
-    the corresponding :mod:`pyproject.toml` ``[project].version``);
-    ``python`` is the runtime version which varies by test environment;
-    and ``name`` may evolve when the upstream Node.js source is ported
-    and brings its own canonical service name.
+    project evolves (per :data:`app.__version__` and the corresponding
+    :mod:`pyproject.toml` ``[project].version``); ``python`` is the
+    runtime version which varies by test environment; and ``name`` may
+    evolve when the upstream Node.js source is ported and brings its
+    own canonical service name.
     """
     response = client.get("/version")
     data = response.get_json()
@@ -288,52 +349,7 @@ def test_version_has_expected_keys(client: FlaskClient) -> None:
     assert len(data["python"]) > 0, "'python' must be a non-empty string"
 
 
-def test_version_python_runtime_is_valid_semver_like(client: FlaskClient) -> None:
-    """Verify ``GET /version``'s ``python`` field looks like a Python version string.
-
-    :func:`platform.python_version` returns strings such as ``"3.12.3"``
-    or ``"3.11.10"`` — major.minor.patch components separated by dots.
-    This test catches the bug class where a handler accidentally
-    returned a placeholder like ``"unknown"``, an empty string, or an
-    unrelated identifier (these would all pass the type/empty checks
-    in :func:`test_version_has_expected_keys` but fail here).
-
-    Validation strategy:
-
-    1. Split the version on ``"."``.
-    2. Require at least 2 components (``major.minor``); Python release
-       strings always have 3 (``major.minor.patch``) but a 2-component
-       form would still be parseable.
-    3. Require the first two components (the major and minor numbers)
-       to be entirely digit characters — Python's major is always
-       ``"3"`` for Python 3.x and minor is always a non-negative int.
-
-    Specific version numbers are NOT asserted because tests must run
-    on any Python 3.10+ environment per ``requires-python`` in
-    ``pyproject.toml``.
-    """
-    response = client.get("/version")
-    data = response.get_json()
-    python_version = data["python"]
-
-    parts = python_version.split(".")
-    assert len(parts) >= 2, (
-        f"Expected python version with at least major.minor, "
-        f"got {python_version!r} (parts={parts!r})"
-    )
-
-    # Major version must be a positive integer (Python's major is "3").
-    assert parts[0].isdigit(), (
-        f"Major version component not numeric: {parts[0]!r} (full version: {python_version!r})"
-    )
-
-    # Minor version must be a non-negative integer.
-    assert parts[1].isdigit(), (
-        f"Minor version component not numeric: {parts[1]!r} (full version: {python_version!r})"
-    )
-
-
-def test_version_declared_version_matches_semver_pattern(client: FlaskClient) -> None:
+def test_version_value_matches_pattern(client: FlaskClient) -> None:
     """Verify ``GET /version``'s ``version`` field follows a semver-like pattern.
 
     Validates the structural shape ``MAJOR.MINOR[.PATCH][-PRERELEASE][+BUILD]``
@@ -377,6 +393,51 @@ def test_version_declared_version_matches_semver_pattern(client: FlaskClient) ->
             f"Version component {part!r} is not a recognisable semver number "
             f"(stripped: {digit_part!r}; full version: {declared_version!r})"
         )
+
+
+def test_version_python_runtime_is_valid(client: FlaskClient) -> None:
+    """Verify ``GET /version``'s ``python`` field looks like a Python version string.
+
+    :func:`platform.python_version` returns strings such as ``"3.12.3"``
+    or ``"3.11.10"`` — major.minor.patch components separated by dots.
+    This test catches the bug class where a handler accidentally
+    returned a placeholder like ``"unknown"``, an empty string, or an
+    unrelated identifier (these would all pass the type/empty checks
+    in :func:`test_version_has_required_keys` but fail here).
+
+    Validation strategy:
+
+    1. Split the version on ``"."``.
+    2. Require at least 2 components (``major.minor``); Python release
+       strings always have 3 (``major.minor.patch``) but a 2-component
+       form would still be parseable.
+    3. Require the first two components (the major and minor numbers)
+       to be entirely digit characters — Python's major is always
+       ``"3"`` for Python 3.x and minor is always a non-negative int.
+
+    Specific version numbers are NOT asserted because tests must run
+    on any Python 3.10+ environment per ``requires-python`` in
+    ``pyproject.toml``.
+    """
+    response = client.get("/version")
+    data = response.get_json()
+    python_version = data["python"]
+
+    parts = python_version.split(".")
+    assert len(parts) >= 2, (
+        f"Expected python version with at least major.minor, "
+        f"got {python_version!r} (parts={parts!r})"
+    )
+
+    # Major version must be a positive integer (Python's major is "3").
+    assert parts[0].isdigit(), (
+        f"Major version component not numeric: {parts[0]!r} (full version: {python_version!r})"
+    )
+
+    # Minor version must be a non-negative integer.
+    assert parts[1].isdigit(), (
+        f"Minor version component not numeric: {parts[1]!r} (full version: {python_version!r})"
+    )
 
 
 # =============================================================================

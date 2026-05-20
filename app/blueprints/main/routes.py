@@ -51,7 +51,7 @@ from __future__ import annotations
 
 import platform
 
-from flask import jsonify
+from flask import Response, jsonify
 
 from app.blueprints.main import main_bp
 
@@ -82,7 +82,7 @@ SERVICE_NAME = "20April_-"
 
 
 @main_bp.get("/")
-def index():
+def index() -> Response:
     """Service banner endpoint.
 
     Returns a JSON envelope identifying the service and listing the
@@ -102,7 +102,11 @@ def index():
           (``/healthz``, ``/readyz``, ``/version``, ``/api/``).
 
         Status: HTTP 200 (Flask default for :func:`flask.jsonify`
-        responses); ``Content-Type: application/json``.
+        responses); ``Content-Type: application/json``. The explicit
+        :class:`flask.Response` return annotation (rather than a looser
+        :data:`~flask.typing.ResponseReturnValue` union) documents that
+        this handler always returns the concrete
+        :class:`flask.Response` object produced by :func:`flask.jsonify`.
     """
     return jsonify(
         {
@@ -114,7 +118,7 @@ def index():
 
 
 @main_bp.get("/version")
-def version():
+def version() -> Response:
     """Service version/identification endpoint.
 
     Returns a JSON envelope identifying the service by name, declared
@@ -135,7 +139,10 @@ def version():
           :func:`platform.python_version` (e.g. ``"3.12.3"``).
 
         Status: HTTP 200 (Flask default for :func:`flask.jsonify`
-        responses); ``Content-Type: application/json``.
+        responses); ``Content-Type: application/json``. The explicit
+        :class:`flask.Response` return annotation matches the sibling
+        :func:`index` handler so the public service-identity surface
+        carries a uniform typed signature.
     """
     return jsonify(
         {

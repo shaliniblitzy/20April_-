@@ -72,7 +72,7 @@ References
 
 from __future__ import annotations
 
-from flask import jsonify
+from flask import Response, jsonify
 
 from app.blueprints.api import api_bp
 
@@ -115,7 +115,7 @@ _PLACEHOLDER_DETAIL: str = (
 # behaviour and is the expected contract for this placeholder.
 # -----------------------------------------------------------------------------
 @api_bp.get("/")
-def api_placeholder():
+def api_placeholder() -> tuple[Response, int]:
     """Placeholder endpoint reserved for the ported Node.js API surface.
 
     This view function exists solely to give the ``api`` Blueprint a
@@ -164,7 +164,12 @@ def api_placeholder():
         element is the integer HTTP status code (``501``) applied to
         the response. The explicit tuple form (rather than a bare
         :class:`flask.Response`) guarantees the status header matches
-        the ``code`` field embedded in the JSON body byte-for-byte.
+        the ``code`` field embedded in the JSON body byte-for-byte. The
+        annotation ``tuple[Response, int]`` documents this tuple shape
+        precisely; an alternative loose annotation
+        :data:`~flask.typing.ResponseReturnValue` would technically
+        type-check but obscures the exact runtime contract that the
+        handler always returns a 2-tuple of (``Response``, ``int``).
     """
     response = jsonify(
         {

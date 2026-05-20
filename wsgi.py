@@ -24,9 +24,18 @@ A reasonable starting point for I/O-bound workloads is::
 
 For CPU-bound workloads, increase ``--workers`` rather than ``--threads``.
 For genuinely async code paths, install ``Flask[async]`` and switch to
-``--worker-class gevent`` or ``--worker-class uvicorn.workers.UvicornWorker``.
-See AAP §0.6.3 for the concurrency-model translation rationale from the
-original Node.js event-loop model.
+``--worker-class gevent`` (the documented async option for serving Flask
+through gunicorn). Note that Flask is a WSGI framework: even when view
+functions are declared ``async def``, each request still occupies a
+WSGI worker for its full lifetime — ``async def`` views buy
+intra-handler concurrency, not free server-side concurrency. Serving
+Flask through a genuinely ASGI server (Uvicorn, Hypercorn) requires
+wrapping the WSGI callable in a WSGI-to-ASGI adapter such as
+:class:`asgiref.wsgi.WsgiToAsgi`; that adapter wiring is intentionally
+NOT provided here — gunicorn's WSGI-native worker classes
+(``sync``, ``gthread``, ``gevent``) are the recommended path for this
+scaffold. See AAP §0.6.3 for the concurrency-model translation
+rationale from the original Node.js event-loop model.
 
 Development usage
 -----------------
