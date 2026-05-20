@@ -29,8 +29,9 @@ AAP §0.3.3 and §0.6.2, are:
 * **Mechanical Node→Python port** — the AAP §0.6.2 idiom map shows that
   every Node ``app.use(middleware)`` call maps to a single function call
   inside :func:`create_app` (``configure_logging(app)``,
-  ``register_error_handlers(app)``, ``register_blueprint(bp)``). Future
-  porting work is therefore localized to this function.
+  ``register_error_handlers(app)``, ``register_security_headers(app)``,
+  ``register_blueprint(bp)``). Future porting work is therefore
+  localized to this function.
 
 Consumers
 ---------
@@ -69,12 +70,22 @@ function body:
    :func:`app.errors.register_error_handlers` so any error raised during
    the remaining steps (or during request handling) flows through the
    standard JSON envelope.
-7. Register the three Blueprints: :data:`app.blueprints.health.health_bp`,
+7. Register the defense-in-depth response-header policy via
+   :func:`app.security.register_security_headers` so every response —
+   successful, redirected, or error — carries the documented set of
+   security headers (``X-Content-Type-Options``, ``X-Frame-Options``,
+   ``Referrer-Policy``, ``Permissions-Policy``,
+   ``Content-Security-Policy``, ``X-XSS-Protection``,
+   ``Cross-Origin-Opener-Policy``, ``Cross-Origin-Embedder-Policy``,
+   ``Cross-Origin-Resource-Policy``) and the generic ``Server: api``
+   identifier that replaces the default WSGI-server disclosure. This
+   step closes the Checkpoint 4 QA MINOR Issues 2 and 3.
+8. Register the three Blueprints: :data:`app.blueprints.health.health_bp`,
    :data:`app.blueprints.main.main_bp`, and
    :data:`app.blueprints.api.api_bp`.
-8. Emit a single ``INFO``-level startup line so operators see positive
+9. Emit a single ``INFO``-level startup line so operators see positive
    evidence that the factory ran end-to-end.
-9. Return the configured :class:`flask.Flask` instance.
+10. Return the configured :class:`flask.Flask` instance.
 
 Public API
 ----------
@@ -252,6 +263,14 @@ from app.errors import register_error_handlers  # noqa: E402
 # emitted (including the startup confirmation in this module) so the
 # resulting log stream is uniformly formatted from the very first record.
 from app.logging_config import configure_logging  # noqa: E402
+
+# Defense-in-depth response-header policy. Called AFTER the error handlers
+# are registered so that the security-header ``after_request`` hook also
+# applies to error responses (404/405/500/501) — every response that
+# leaves the WSGI callable must carry the standard header set and the
+# generic ``Server`` identifier. Closes the Checkpoint 4 QA MINOR Issues
+# 2 (security hardening headers) and 3 (Server header disclosure).
+from app.security import register_security_headers  # noqa: E402
 
 
 # =============================================================================
@@ -466,7 +485,39 @@ def create_app(config_name: str | None = None) -> Flask:
     register_error_handlers(app)
 
     # ------------------------------------------------------------------
-    # 7. Register Blueprints
+    # 7. Register defense-in-depth response-header policy
+    # ------------------------------------------------------------------
+    # Attaches a single ``@app.after_request`` hook that adds the
+    # documented set of security headers (``X-Content-Type-Options``,
+    # ``X-Frame-Options``, ``Referrer-Policy``, ``Permissions-Policy``,
+    # ``Content-Security-Policy``, ``X-XSS-Protection``,
+    # ``Cross-Origin-Opener-Policy``, ``Cross-Origin-Embedder-Policy``,
+    # ``Cross-Origin-Resource-Policy``) to every outgoing response and
+    # overrides the ``Server`` header to the generic ``"api"``
+    # identifier so the WSGI server name does not leak.
+    #
+    # Registered AFTER the error handlers (step 6) so the
+    # ``after_request`` hook also runs on error responses produced by
+    # the centralized handlers in :mod:`app.errors`; Flask's
+    # ``after_request`` machinery invokes the registered hook(s) on
+    # every response Flask returns regardless of whether the body came
+    # from a successful view or an error handler.
+    #
+    # Registered BEFORE Blueprint registration (step 8) for the same
+    # defensive ordering rationale documented for the error handlers:
+    # a hypothetical exception during Blueprint registration would
+    # still surface to the client through both the JSON envelope and
+    # the security-header policy.
+    #
+    # See :mod:`app.security` for the full rationale of each header
+    # value and the choice not to emit ``Strict-Transport-Security``
+    # (deferred to the TLS-terminating proxy where TLS state is
+    # actually known). Closes the Checkpoint 4 QA MINOR Issues 2
+    # (defense-in-depth headers) and 3 (``Server`` header disclosure).
+    register_security_headers(app)
+
+    # ------------------------------------------------------------------
+    # 8. Register Blueprints
     # ------------------------------------------------------------------
     # Each Blueprint is registered explicitly (no loop) so the
     # registration intent is unambiguous to static analysers and the
@@ -489,7 +540,7 @@ def create_app(config_name: str | None = None) -> Flask:
     app.register_blueprint(api_bp)
 
     # ------------------------------------------------------------------
-    # 8. Emit startup confirmation log line
+    # 9. Emit startup confirmation log line
     # ------------------------------------------------------------------
     # Operators rely on this line as positive evidence that the factory
     # completed end-to-end. The ``%s``-style formatting (rather than
@@ -505,7 +556,7 @@ def create_app(config_name: str | None = None) -> Flask:
     )
 
     # ------------------------------------------------------------------
-    # 9. Return the configured instance
+    # 10. Return the configured instance
     # ------------------------------------------------------------------
     # The returned object is consumed by:
     #   * :mod:`wsgi` (production) — assigns to ``app = create_app()``

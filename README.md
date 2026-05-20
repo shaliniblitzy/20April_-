@@ -53,6 +53,7 @@ The target repository layout after the scaffold is generated is shown below
 ├── pyproject.toml                         # PEP 621 project metadata + tool config
 ├── requirements.txt                       # pinned runtime dependencies
 ├── requirements-dev.txt                   # pinned dev/test dependencies
+├── gunicorn.conf.py                       # gunicorn server configuration (limit_request_line, bind, workers)
 ├── wsgi.py                                # gunicorn entry point: `gunicorn wsgi:app`
 ├── app/
 │   ├── __init__.py                        # application factory: create_app()
@@ -60,6 +61,7 @@ The target repository layout after the scaffold is generated is shown below
 │   ├── extensions.py                      # extension-singleton placeholder
 │   ├── errors.py                          # centralised HTTP error handlers
 │   ├── logging_config.py                  # dictConfig-based logging setup
+│   ├── security.py                        # defense-in-depth response-header policy
 │   └── blueprints/
 │       ├── __init__.py                    # re-exports blueprint objects
 │       ├── health/
@@ -77,7 +79,9 @@ The target repository layout after the scaffold is generated is shown below
     ├── test_app_factory.py
     ├── test_health.py
     ├── test_main.py
-    └── test_api.py
+    ├── test_api.py
+    ├── test_security.py                   # security-header & Server-token contract tests
+    └── test_gunicorn_conf.py              # gunicorn config + Server-token override tests
 ```
 
 
@@ -153,9 +157,37 @@ Use gunicorn for production deployments — it is the WSGI server pinned in
 `requirements.txt` and is the recommended production runner for Flask.
 
 ```bash
-# Minimal invocation.
-gunicorn wsgi:app --bind 0.0.0.0:5000
+# Minimal invocation — auto-loads gunicorn.conf.py from the repo root.
+gunicorn wsgi:app
 ```
+
+The `gunicorn.conf.py` file at the repository root is auto-discovered by
+gunicorn. It pre-configures:
+
+- `bind = ${HOST}:${PORT}` resolved from the same environment variables
+  the Flask `app.config` reads (defaults to `0.0.0.0:5000`).
+- `workers`, `worker_class` resolved from `GUNICORN_WORKERS` and
+  `GUNICORN_WORKER_CLASS` (defaults: `1` worker, `sync` class).
+- `limit_request_line = 8190` — gunicorn's documented maximum
+  non-unlimited value (doubled from the default of `4094`). Realistic
+  long URLs up to 8190 bytes (large pagination tokens, signed URLs,
+  JWT/base64 tokens in query strings) are now passed through to Flask's
+  JSON error handlers rather than rejected at the HTTP layer with a
+  plain `text/html` 400 page. Override via the `GUNICORN_LIMIT_REQUEST_LINE`
+  environment variable; the special value `0` removes the limit (with a
+  1 MiB internal safety net). For URLs > 8190 bytes the recommended
+  production posture is a reverse proxy. See `gunicorn.conf.py` for
+  the full DoS-protection rationale.
+- **`Server` header override** — gunicorn unconditionally emits
+  `Server: gunicorn` on every response and strips any
+  application-supplied `Server` header (gunicorn treats `Server` as a
+  hop-by-hop header). `gunicorn.conf.py` rebinds gunicorn's internal
+  `SERVER` constant to the generic value `api` via an `on_starting`
+  hook before workers fork, so the wire response carries `Server: api`
+  regardless of layer. Override via `GUNICORN_SERVER_TOKEN=<value>` or
+  set `GUNICORN_SERVER_TOKEN=` (empty) to opt out and restore gunicorn's
+  default. See the "Security posture" section below for the full
+  rationale.
 
 Worker tuning guidance (see AAP §0.6.3 for the full concurrency-model
 translation):
@@ -260,6 +292,64 @@ will be added under `app/blueprints/api/routes.py`.
 Once the Node.js source is supplied, its endpoints must be reproduced exactly
 (same method, path, request schema, response schema, and status codes) inside
 `app/blueprints/api/routes.py`. See AAP §0.7.2 for the preservation contract.
+
+
+## Security posture
+
+The scaffold ships with a defense-in-depth response-header policy registered
+by `app/security.py::register_security_headers` during application-factory
+startup. The policy attaches a single `@app.after_request` hook that adds
+the following headers to **every** response — successful, redirected, and
+error — produced by the application:
+
+| Header                          | Value                                                                                                | Purpose                                                                       |
+| ------------------------------- | ---------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| `X-Content-Type-Options`        | `nosniff`                                                                                            | Disable MIME-sniffing; force browsers to honour `Content-Type`.               |
+| `X-Frame-Options`               | `DENY`                                                                                               | Forbid framing in `<iframe>`, `<embed>`, `<object>`.                          |
+| `Referrer-Policy`               | `no-referrer`                                                                                        | Suppress `Referer` on outbound navigation.                                    |
+| `Permissions-Policy`            | `geolocation=(), camera=(), microphone=(), usb=(), payment=(), interest-cohort=()`                   | Disable hardware/feature capabilities the API does not use.                   |
+| `Content-Security-Policy`       | `default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`                    | Restrictive default; appropriate for JSON-only API.                           |
+| `X-XSS-Protection`              | `0`                                                                                                  | Explicitly disable legacy browser XSS auditors (OWASP modern guidance).       |
+| `Cross-Origin-Opener-Policy`    | `same-origin`                                                                                        | Isolate the browsing context group.                                           |
+| `Cross-Origin-Embedder-Policy`  | `require-corp`                                                                                       | Require cross-origin resources to opt in via CORP.                            |
+| `Cross-Origin-Resource-Policy`  | `same-origin`                                                                                        | Block no-cors cross-origin reads of the response body.                        |
+| `Server`                        | `api`                                                                                                | Override the WSGI server name (default `gunicorn`/`Werkzeug`) with a generic identifier. |
+
+`Strict-Transport-Security` is intentionally NOT set by the application — it
+is only meaningful over HTTPS, and the proper place to emit it is the
+TLS-terminating reverse proxy (nginx, Caddy, AWS ALB, Cloudflare) where TLS
+state is actually known.
+
+See `app/security.py` for the full rationale of each header value and the
+documented seams for future port-time refinement (e.g., per-content-type
+CSP relaxation if HTML rendering is introduced).
+
+### `Server` header — two-layer override
+
+The `Server: api` value above is enforced at **two** layers, because Flask
+and gunicorn handle the `Server` header differently:
+
+* **Flask layer (`app/security.py`)** — sets `response.headers["Server"] =
+  "api"` in the `@app.after_request` hook. This is sufficient for
+  non-gunicorn deployments (`flask run`, uWSGI, Hypercorn, the
+  `Werkzeug` test client used by pytest).
+* **Gunicorn layer (`gunicorn.conf.py`)** — gunicorn treats `Server` as
+  a hop-by-hop header (`util.is_hoppish('Server') == True`) and
+  silently DROPS any application-supplied `Server` header in
+  `Response.process_headers()`. It then prepends its own
+  `Server: gunicorn` from the module-level `SERVER` constant in
+  `gunicorn/__init__.py`. `gunicorn.conf.py` therefore rebinds that
+  constant — in both `gunicorn` and `gunicorn.http.wsgi` — to the
+  generic token via an `on_starting` server hook before any worker is
+  forked. The patch is also applied eagerly at config-load time so
+  the override takes effect regardless of `--preload` ordering.
+
+The token is overridable via the `GUNICORN_SERVER_TOKEN` environment
+variable for deployments that prefer a different value (e.g.,
+`GUNICORN_SERVER_TOKEN=myservice`). Setting the variable to the empty
+string opts out of the gunicorn-layer override (gunicorn's own
+`Server: gunicorn` is restored), which is provided as an explicit
+escape hatch for diagnostic scenarios.
 
 
 ## Testing
