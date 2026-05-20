@@ -1,0 +1,18 @@
+# =============================================================================
+# Development & test dependencies per AAP §0.5.1.
+#
+# Inherits all runtime pins from requirements.txt so a single
+#   pip install -r requirements-dev.txt
+# fully provisions the development environment.
+# =============================================================================
+-r requirements.txt
+
+# Test runner and Flask fixtures
+pytest>=8.0
+pytest-flask>=1.3.0
+
+# Lint / format
+ruff>=0.6.0
+
+# Optional static type-checking
+mypy>=1.10
