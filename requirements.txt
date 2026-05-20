@@ -18,7 +18,11 @@
 #   - Flask and gunicorn use exact pins (==) for reproducible production
 #     deployments and parity with the AAP's stated contract.
 #   - python-dotenv uses a lower-bound pin (>=) per AAP §0.5.1 to allow
-#     security patches inside the 1.x series.
+#     security patches inside the 1.x series. The floor is intentionally
+#     `>=1.2.2`: every release prior to 1.2.2 is affected by
+#     CVE-2026-28684 (symlink-following arbitrary file overwrite in
+#     `set_key()` / `unset_key()`, published 2026-04-20). The floor MUST
+#     stay at 1.2.2 or higher here and in `pyproject.toml`.
 #   - Transitive dependencies (Werkzeug, Jinja2, MarkupSafe, ItsDangerous,
 #     Click, Blinker) are intentionally NOT hand-pinned here; pip resolves
 #     them from Flask 3.1.3's own metadata so security patches flow in
@@ -66,4 +70,8 @@ gunicorn==26.0.0
 # `.env.example` file in this repository documents every variable the
 # application reads (FLASK_APP, FLASK_CONFIG, SECRET_KEY, HOST, PORT,
 # LOG_LEVEL).
-python-dotenv>=1.0.1
+#
+# Security floor: `>=1.2.2` excludes releases vulnerable to CVE-2026-28684
+# (symlink-following arbitrary file overwrite in `set_key()` / `unset_key()`,
+# patched in 1.2.2 on 2026-04-20). Do not lower this bound.
+python-dotenv>=1.2.2

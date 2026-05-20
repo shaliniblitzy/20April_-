@@ -123,7 +123,15 @@ python -c "import secrets; print(secrets.token_hex(32))"
 
 ### Development mode (`flask run`)
 
-The development server reloads on source changes and serves a single thread.
+The development server is intended for local development only — it does not
+provide the stability, security, or performance characteristics of a
+production WSGI server. The reloader and the interactive debugger are
+enabled by default when `--debug` is passed (or `FLASK_DEBUG=1` is set), and
+**multithreading is enabled by default**: `flask run` accepts a
+`--with-threads / --without-threads` flag whose default in Flask 3.1.x is
+`--with-threads`. Supply `--without-threads` only when single-threaded
+behaviour is required.
+
 `FLASK_APP=wsgi:app` makes the `flask` CLI import `wsgi.py`, which in turn
 calls `create_app()` exported from `app/__init__.py`.
 `python-dotenv` is loaded automatically by the `flask` CLI when `.env` is
@@ -186,14 +194,39 @@ All runtime configuration is driven by environment variables. The single
 authoritative declaration of every variable lives in `.env.example`; copy it
 to `.env` for local development.
 
-| Variable       | Default        | Purpose                                                                 |
-| -------------- | -------------- | ----------------------------------------------------------------------- |
-| `FLASK_APP`    | `wsgi:app`     | Application import string used by the `flask` CLI.                      |
-| `FLASK_CONFIG` | `development`  | Selects `DevelopmentConfig` / `ProductionConfig` / `TestingConfig`.     |
-| `SECRET_KEY`   | `change-me`    | Flask secret key — **MUST be changed in every non-development env**.   |
-| `HOST`         | `0.0.0.0`      | Bind host for `flask run` and the `--bind` argument to gunicorn.        |
-| `PORT`         | `5000`         | Bind port (same scope as `HOST`).                                       |
-| `LOG_LEVEL`    | `INFO`         | Root log level honoured by `app/logging_config.py`.                     |
+The table below lists every variable with **two** columns to keep template
+and runtime semantics distinct:
+
+- **`.env.example` value** — the literal string committed in `.env.example`
+  and copied into a developer `.env` by `cp .env.example .env`. These are
+  placeholder defaults intended for local development only.
+- **Code default (when variable is unset)** — the value `app/config.py` /
+  `app/logging_config.py` falls back to if the environment variable is
+  absent from `os.environ` at process startup. This is what runs in
+  production when the deployment platform does not export the variable.
+
+| Variable       | `.env.example` value | Code default (when variable is unset) | Purpose                                                                                |
+| -------------- | -------------------- | ------------------------------------- | -------------------------------------------------------------------------------------- |
+| `FLASK_APP`    | `wsgi:app`           | n/a (consumed by `flask` CLI only)    | Application import string used by the `flask` CLI.                                     |
+| `FLASK_CONFIG` | `development`        | `development` (via the `default` alias in `app/config.py::config_by_name`) | Selects `DevelopmentConfig` / `ProductionConfig` / `TestingConfig`.                    |
+| `SECRET_KEY`   | `change-me`          | `None` — `BaseConfig.SECRET_KEY = os.environ.get("SECRET_KEY")` | Flask secret key — `change-me` is a **template placeholder**, never a runtime default. Production deployments MUST set this from a secret manager or the native process environment. |
+| `HOST`         | `0.0.0.0`            | `0.0.0.0`                             | Bind host for `flask run` and the `--bind` argument to gunicorn.                       |
+| `PORT`         | `5000`               | `5000`                                | Bind port (same scope as `HOST`).                                                      |
+| `LOG_LEVEL`    | `INFO`               | `INFO`                                | Root log level honoured by `app/logging_config.py`.                                    |
+
+**About `SECRET_KEY`:** the literal string `change-me` is only present in
+`.env.example` as a placeholder that developers replace locally; it is not
+a hardcoded application default. When the `SECRET_KEY` environment variable
+is unset and no `.env` file exists, `BaseConfig.SECRET_KEY` evaluates to
+`None`, which causes Flask to refuse to sign session cookies and surfaces a
+loud failure rather than silently signing with a predictable key. The
+`TestingConfig` subclass overrides this to a hard-coded value
+(`"test-secret-key"`) so hermetic test runs do not require the variable to
+be present. Generate a real production value with:
+
+```bash
+python -c "import secrets; print(secrets.token_hex(32))"
+```
 
 Notes on loading behaviour:
 

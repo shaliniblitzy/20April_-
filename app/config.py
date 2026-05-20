@@ -26,8 +26,21 @@ Selection
 The application factory in :mod:`app` selects which class to load via the
 :data:`config_by_name` mapping, keyed by the ``FLASK_CONFIG`` environment
 variable. The accepted keys are ``development``, ``production``, ``testing``,
-and ``default`` (an alias for ``DevelopmentConfig`` used as a deterministic
-fallback when ``FLASK_CONFIG`` is unset or misspelled).
+and ``default`` (an alias for :class:`DevelopmentConfig`).
+
+The ``default`` alias only takes effect when the future ``create_app()`` is
+written to consult it explicitly — direct subscription
+(``config_by_name[config_name]``) would raise :class:`KeyError` for an
+unknown ``config_name`` rather than falling back to ``default``. The
+authoritative resolution pattern for ``app/__init__.py`` is therefore::
+
+    config_name = os.environ.get("FLASK_CONFIG", "default")
+    config_cls = config_by_name.get(config_name, config_by_name["default"])
+    app.config.from_object(config_cls)
+
+Using ``dict.get(...)`` with an explicit fallback turns an unset or
+misspelled ``FLASK_CONFIG`` into a deterministic ``DevelopmentConfig``
+selection instead of an unhandled :class:`KeyError` at startup.
 
 Class-attribute convention
 --------------------------
@@ -48,8 +61,18 @@ mirrored here as:
 
 The mapping is intentionally mechanical: each Node ``process.env.X`` becomes
 exactly one Python ``X = os.environ.get("X", <default>)`` line in this file.
-No environment variable reads should ever appear elsewhere in the
-``app/`` package — this module is the only consumer of :mod:`os.environ`.
+Application/business code under ``app/blueprints`` and ``app/services`` MUST
+read configuration via ``current_app.config[NAME]`` rather than touching
+:mod:`os.environ` directly, so that this module remains the single source of
+truth for runtime configuration.
+
+The single deliberate exception to this rule is :mod:`app.logging_config`,
+which reads ``LOG_LEVEL`` from :mod:`os.environ` directly so that
+:func:`app.logging_config.configure_logging` can run BEFORE the Flask
+configuration object is hydrated and therefore log startup messages
+(including configuration loading itself) at the correct verbosity. The
+``LOG_LEVEL`` variable is still mirrored on :class:`BaseConfig` so route
+code may read it via :attr:`flask.Flask.config` once the app is built.
 
 References
 ----------
@@ -118,22 +141,37 @@ class BaseConfig:
 
     # ------------------------------------------------------------------ JSON
     # -- JSON behaviour ------------------------------------------------------
-    JSON_SORT_KEYS: bool = False
-    """Preserve JSON key ordering as written by view functions.
-
-    Flask defaults this to ``True`` (alphabetical), which can mask intentional
-    key ordering used to communicate priority/structure to API clients.
-    Setting it to ``False`` makes :func:`flask.jsonify` emit keys in
-    insertion order.
-    """
-
-    JSONIFY_PRETTYPRINT_REGULAR: bool = False
-    """Emit compact JSON in non-debug mode (no pretty-print).
-
-    Flask pretty-prints JSON by default when ``DEBUG`` is on; this attribute
-    forces compact output regardless of debug status, matching the byte
-    layout typically used in production responses.
-    """
+    # NOTE: Flask 3.x removed the legacy ``JSON_SORT_KEYS`` and
+    # ``JSONIFY_PRETTYPRINT_REGULAR`` configuration keys; in Flask 3.1.3
+    # ``app.config.from_object(...)`` silently copies them into ``app.config``
+    # but they are no-ops — ``flask.jsonify`` reads its behaviour from the
+    # active :class:`flask.json.provider.JSONProvider` instance attached to
+    # the application (``app.json``), NOT from ``app.config``.
+    #
+    # Empirically verified on Flask 3.1.3:
+    #
+    #     app = Flask(__name__)
+    #     app.config.from_mapping(JSON_SORT_KEYS=False)
+    #     # app.config['JSON_SORT_KEYS'] == False, but...
+    #     # app.json.sort_keys is still True, and
+    #     # jsonify({'b': 1, 'a': 2}) still emits {"a":2,"b":1}.
+    #
+    # The equivalent intent (preserve insertion order, emit compact output)
+    # MUST therefore be expressed against the JSON provider directly inside
+    # the application factory once it exists. The future ``create_app()``
+    # implementation is required to call, after building the Flask instance
+    # and loading config:
+    #
+    #     app.json.sort_keys = False  # preserve insertion order
+    #     app.json.compact = True     # compact separators in production
+    #
+    # These two attributes (``sort_keys`` and ``compact``) are the canonical
+    # Flask 3.x replacements for the removed config keys. No Flask
+    # configuration attribute is set here because doing so would be
+    # misleading — readers would assume the configuration mechanism still
+    # works on Flask 3.x when it does not. See AAP §0.6.4 (Configuration &
+    # Environment Parity) and the future ``app/__init__.py::create_app``
+    # contract for where the JSON provider is wired.
 
     # ----------------------------------------------------------------- Server
     # -- Server bindings -----------------------------------------------------
@@ -249,8 +287,15 @@ class TestingConfig(BaseConfig):
     * ``SECRET_KEY`` is hard-coded so the test suite runs hermetically even
       when the ``SECRET_KEY`` environment variable is unset (typical in CI
       sandboxes).
-    * ``WTF_CSRF_ENABLED = False`` — disables Flask-WTF CSRF protection if/
-      when the package is added. Harmless when Flask-WTF is not installed.
+
+    Scope note
+    ----------
+    Configuration keys for Flask extensions that are NOT in the current
+    dependency manifest (e.g. ``WTF_CSRF_ENABLED`` for Flask-WTF) are
+    intentionally absent here. They must be added in the same change that
+    introduces the corresponding dependency, declares the attribute on
+    :class:`BaseConfig`, and documents it in ``.env.example`` if it is
+    environment-driven (AAP §0.6.4).
     """
 
     TESTING: bool = True
@@ -258,26 +303,32 @@ class TestingConfig(BaseConfig):
     # The hard-coded value is intentional test fixture data, not a real
     # secret. Suppress ruff/bandit "hardcoded password" warnings.
     SECRET_KEY: str = "test-secret-key"  # noqa: S105
-    WTF_CSRF_ENABLED: bool = False
 
 
 # =============================================================================
 # config_by_name — application factory selection surface
 # =============================================================================
-# The application factory resolves the active config class via:
+# The application factory MUST resolve the active config class via
+# :meth:`dict.get` with an explicit fallback to the ``"default"`` entry, so
+# that an unset or misspelled ``FLASK_CONFIG`` yields a deterministic
+# :class:`DevelopmentConfig` selection instead of an unhandled
+# :class:`KeyError` at startup. The authoritative pattern is::
 #
 #     config_name = os.environ.get("FLASK_CONFIG", "default")
-#     app.config.from_object(config_by_name[config_name])
+#     config_cls = config_by_name.get(config_name, config_by_name["default"])
+#     app.config.from_object(config_cls)
+#
+# Direct subscription (``config_by_name[config_name]``) is intentionally NOT
+# documented here — it would silently break on misspellings.
 #
 # Using a mapping (rather than an ``if/elif`` chain) keeps the resolution
 # logic in :mod:`app.__init__` declarative and easy to extend: adding a new
 # environment only requires (1) subclassing :class:`BaseConfig` here and
 # (2) appending a row below.
 #
-# ``"default"`` is an alias to :class:`DevelopmentConfig` so an unset or
-# misspelled ``FLASK_CONFIG`` value still yields a deterministic, safe
-# configuration in local development. Production deployments should set
-# ``FLASK_CONFIG=production`` explicitly.
+# ``"default"`` is an alias to :class:`DevelopmentConfig`; production
+# deployments MUST set ``FLASK_CONFIG=production`` explicitly so the fallback
+# never silently selects development behaviour outside of local development.
 #
 # The value type is ``type[BaseConfig]`` — class objects, not instances —
 # because :meth:`flask.Config.from_object` accepts class objects directly
