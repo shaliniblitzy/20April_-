@@ -36,6 +36,39 @@ Where:
   traces or file paths — those are emitted to the application log via
   :func:`logger.exception`, never to the HTTP response.
 
+Protocol-header preservation
+----------------------------
+HTTP error responses sometimes carry status-specific headers whose
+semantics are part of the HTTP standard (RFC 9110) — the response body
+is not the only thing that matters. Examples include:
+
+* ``Allow`` on ``405 Method Not Allowed`` — RFC 9110 §15.5.6 REQUIRES the
+  ``Allow`` header on every 405 response, listing the methods that are
+  supported by the target resource. Clients (notably API gateways and
+  browsers' CORS preflight machinery) rely on this header to discover the
+  supported method set.
+* ``WWW-Authenticate`` on ``401 Unauthorized`` — RFC 9110 §15.5.2
+  REQUIRES the ``WWW-Authenticate`` header on every 401 response,
+  identifying the authentication scheme(s) the client may use. Without
+  it, clients cannot satisfy the challenge.
+* ``Retry-After`` on ``503 Service Unavailable`` and ``429 Too Many
+  Requests`` — RFC 9110 §10.2.3 / §15.5.20 specify this hint to clients
+  for when to retry.
+
+Werkzeug's :class:`~werkzeug.exceptions.HTTPException` subclasses already
+attach these headers to the response they generate (e.g.
+:class:`werkzeug.exceptions.MethodNotAllowed` accepts ``valid_methods``
+and emits ``Allow`` automatically). Naively replacing that response with a
+fresh :func:`jsonify` body discards those headers — the prior version of
+this module had exactly that bug and was flagged by Checkpoint 3 review.
+
+The handlers below now read the headers Werkzeug already attached to the
+canonical response via :meth:`werkzeug.exceptions.HTTPException.get_response`
+and merge them onto the JSON response BEFORE returning it. ``Content-Type``
+and ``Content-Length`` are intentionally excluded from the merge because
+they describe Werkzeug's HTML body, not our JSON body. Every other header
+is preserved verbatim.
+
 Centralizing this contract here (rather than scattering ``jsonify(...)``
 calls across every blueprint) is the explicit design decision recorded in
 Agent Action Plan (AAP) §0.3.3 *Centralized Error Handlers* and §0.6.7
@@ -81,6 +114,9 @@ References
   centralized)
 * Flask docs — ``@app.errorhandler`` decorator semantics
 * Werkzeug docs — ``werkzeug.exceptions.HTTPException`` hierarchy
+* RFC 9110 §15.5.2 — ``WWW-Authenticate`` on 401 responses (REQUIRED)
+* RFC 9110 §15.5.6 — ``Allow`` on 405 responses (REQUIRED)
+* RFC 9110 §10.2.3, §15.5.20 — ``Retry-After`` on 503/429 responses
 """
 
 from __future__ import annotations
@@ -120,7 +156,97 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Internal helpers.
 # ---------------------------------------------------------------------------
-def _make_error_response(status: int, message: str) -> tuple:
+
+# Headers that describe Werkzeug's HTML error body rather than the JSON
+# body we substitute. They MUST NOT be carried over from the Werkzeug
+# response, because copying them would either misdescribe the JSON body
+# (``Content-Type: text/html``) or cause downstream caches/clients to
+# truncate or refuse the body (``Content-Length`` mismatch).
+#
+# A ``frozenset`` is used so the membership test in
+# :func:`_extract_preserved_headers` is O(1) and the constant is immutable.
+# Comparison is case-insensitive because HTTP header names are
+# case-insensitive (RFC 9110 §5.1); the entries are stored upper-cased and
+# every input is upper-cased before comparison.
+_HEADERS_NOT_PRESERVED: frozenset[str] = frozenset({"CONTENT-TYPE", "CONTENT-LENGTH"})
+
+
+def _extract_preserved_headers(error: HTTPException) -> list[tuple[str, str]]:
+    """Extract protocol/security headers from a Werkzeug HTTPException response.
+
+    Werkzeug's HTTPException subclasses encode status-specific headers on
+    the canonical response they generate. The most important examples
+    relevant to this scaffold:
+
+    * :class:`werkzeug.exceptions.MethodNotAllowed` attaches an ``Allow``
+      header populated from the route's registered methods.
+    * :class:`werkzeug.exceptions.Unauthorized` attaches a
+      ``WWW-Authenticate`` header derived from its ``www_authenticate``
+      keyword argument (or its :attr:`Unauthorized.www_authenticate`
+      attribute), unless an explicit "no challenge" sentinel is supplied.
+    * :class:`werkzeug.exceptions.TooManyRequests` and
+      :class:`werkzeug.exceptions.ServiceUnavailable` may attach a
+      ``Retry-After`` header.
+
+    Naively building a new :func:`jsonify` response and returning it
+    discards all of the above. This helper reads the headers that
+    Werkzeug already attached to the response it would have rendered
+    and returns the protocol-significant ones so the caller can merge
+    them onto the JSON response.
+
+    Filtering rules:
+
+    * Header names compared case-insensitively (RFC 9110 §5.1).
+    * ``Content-Type`` is dropped — our response carries
+      ``application/json``, not Werkzeug's ``text/html; charset=utf-8``.
+    * ``Content-Length`` is dropped — our JSON body has a different byte
+      length than Werkzeug's HTML body, and an incorrect length is
+      treated as a hard error by HTTP/1.1 clients.
+    * Every other header (``Allow``, ``WWW-Authenticate``, ``Retry-After``,
+      vendor extensions, etc.) is preserved verbatim.
+
+    Defensive handling:
+
+    * If :meth:`error.get_response` raises (e.g. because a custom
+      :class:`HTTPException` subclass overrides it with a broken
+      implementation), the function returns an empty list rather than
+      letting the exception propagate. Error handlers must NEVER raise
+      themselves — see the module docstring.
+
+    Args:
+        error: The :class:`werkzeug.exceptions.HTTPException` whose
+            response headers should be inspected. Typically the same
+            ``error`` object Flask passes positionally to the
+            ``@app.errorhandler``-registered function.
+
+    Returns:
+        A list of ``(name, value)`` tuples containing the headers worth
+        preserving on the JSON response, in the order Werkzeug supplied
+        them. Empty list if no preserved headers are present or if
+        accessing ``error.get_response()`` failed.
+    """
+    try:
+        werkzeug_response = error.get_response()
+    except Exception:  # pragma: no cover - defensive: handlers must not raise
+        return []
+
+    preserved: list[tuple[str, str]] = []
+    # ``werkzeug.datastructures.Headers`` supports iteration as
+    # ``(name, value)`` tuples — the canonical way to enumerate headers
+    # without lifting them into a dict (a dict would lose duplicate
+    # entries, which the HTTP spec permits for some headers).
+    for name, value in werkzeug_response.headers.items():
+        if name.upper() in _HEADERS_NOT_PRESERVED:
+            continue
+        preserved.append((name, value))
+    return preserved
+
+
+def _make_error_response(
+    status: int,
+    message: str,
+    extra_headers: list[tuple[str, str]] | None = None,
+) -> tuple:
     """Build the standard JSON error response envelope.
 
     This is the SINGLE source of truth for the error response shape used
@@ -137,6 +263,19 @@ def _make_error_response(status: int, message: str) -> tuple:
     form (rather than mutating ``response.status_code`` after construction)
     keeps the function pure and trivially unit-testable.
 
+    Header preservation:
+
+    When ``extra_headers`` is supplied, each ``(name, value)`` pair is
+    added to the response BEFORE returning. This is used by the 405
+    handler and the ``HTTPException`` catch-all to carry protocol-required
+    headers (``Allow``, ``WWW-Authenticate``, ``Retry-After``) from
+    Werkzeug's canonical response onto our JSON response — see the
+    module docstring's "Protocol-header preservation" section for the
+    standards-compliance rationale. The caller is responsible for
+    filtering out ``Content-Type`` / ``Content-Length`` before passing
+    headers in; :func:`_extract_preserved_headers` is the canonical
+    source of correctly-filtered header lists.
+
     Args:
         status: HTTP status code to apply to the response and embed in the
             envelope's ``code`` field (e.g. ``404``).
@@ -144,15 +283,29 @@ def _make_error_response(status: int, message: str) -> tuple:
             envelope's ``message`` field (e.g. ``"Not Found"``). Should NOT
             contain implementation details (stack traces, internal paths,
             secrets) — those belong in the log, not the HTTP body.
+        extra_headers: Optional list of ``(name, value)`` tuples to attach
+            to the response. Used to preserve protocol-required headers
+            (``Allow``, ``WWW-Authenticate``, ``Retry-After``) from
+            Werkzeug responses. ``None`` (the default) leaves the
+            response headers untouched apart from ``Content-Type``
+            (which :func:`flask.jsonify` sets to ``application/json``).
 
     Returns:
         A ``(response, status)`` tuple where ``response`` is a
         :class:`flask.Response` carrying the JSON body
         ``{"error": {"code": status, "message": message}}`` with
-        ``Content-Type: application/json``, and ``status`` is the
-        integer code passed in.
+        ``Content-Type: application/json`` plus every header from
+        ``extra_headers`` (if supplied), and ``status`` is the integer
+        code passed in.
     """
     response = jsonify({"error": {"code": status, "message": message}})
+    if extra_headers:
+        # Use ``Headers.add`` rather than dict-style assignment so headers
+        # that legitimately appear multiple times (e.g. ``Set-Cookie``)
+        # are preserved. ``jsonify`` does not emit duplicate headers,
+        # so this iteration is purely additive.
+        for name, value in extra_headers:
+            response.headers.add(name, value)
     return response, status
 
 
@@ -224,17 +377,39 @@ def register_error_handlers(app: Flask) -> None:
 
     # ------------------------------------------------------------------ 405
     @app.errorhandler(405)
-    def method_not_allowed(error):  # noqa: ARG001
+    def method_not_allowed(error: HTTPException):
         """Return the standard JSON envelope for HTTP 405 Method Not Allowed.
 
         Triggered when a request's HTTP method does not match any
         registered method for the matched route — for example, a ``POST``
-        request to a route declared as ``@bp.get(...)``. Flask
-        automatically generates an ``Allow`` header listing the
-        supported methods; this handler returns a JSON body in addition
-        to (not in place of) Flask's default header behaviour.
+        request to a route declared as ``@bp.get(...)``.
+
+        Header preservation
+        -------------------
+        RFC 9110 §15.5.6 REQUIRES every 405 response to carry an
+        ``Allow`` header listing the methods supported by the target
+        resource. Werkzeug's
+        :class:`~werkzeug.exceptions.MethodNotAllowed` populates that
+        header automatically from Flask's URL map; this handler extracts
+        it (and any other non-body headers Werkzeug attached) via
+        :func:`_extract_preserved_headers` and merges them onto our JSON
+        response so the wire response remains standards-compliant.
+
+        Without this preservation step (the bug fixed in Checkpoint 3),
+        clients calling ``OPTIONS`` to discover allowed methods, API
+        gateways performing CORS preflight, and any RFC-conformant HTTP
+        client would receive a 405 with no ``Allow`` header — a hard
+        violation of the HTTP specification.
+
+        Args:
+            error: The :class:`werkzeug.exceptions.MethodNotAllowed`
+                instance Flask passes positionally. Its
+                :meth:`get_response` method yields the canonical
+                Werkzeug response from which protocol headers are
+                copied.
         """
-        return _make_error_response(405, "Method Not Allowed")
+        headers = _extract_preserved_headers(error)
+        return _make_error_response(405, "Method Not Allowed", extra_headers=headers)
 
     # ------------------------------------------------------------------ 500
     @app.errorhandler(500)
@@ -277,6 +452,25 @@ def register_error_handlers(app: Flask) -> None:
         codes they cover. This catch-all only fires for HTTP errors
         that do NOT match one of those specific codes.
 
+        Header preservation
+        -------------------
+        Several HTTP error statuses REQUIRE response headers whose
+        semantics are part of the HTTP standard:
+
+        * ``401 Unauthorized`` MUST carry ``WWW-Authenticate``
+          (RFC 9110 §15.5.2).
+        * ``503 Service Unavailable`` SHOULD carry ``Retry-After``
+          (RFC 9110 §15.5.20).
+        * ``429 Too Many Requests`` SHOULD carry ``Retry-After``
+          (RFC 6585 §4).
+
+        Werkzeug's :class:`~werkzeug.exceptions.HTTPException` subclasses
+        already attach these headers to the canonical response they
+        produce; this handler extracts them via
+        :func:`_extract_preserved_headers` and merges them onto our JSON
+        response so the catch-all path remains standards-compliant
+        regardless of which HTTP error subclass was raised.
+
         Defensive handling:
 
         * ``error.code`` is defined by every standard
@@ -291,11 +485,14 @@ def register_error_handlers(app: Flask) -> None:
         Args:
             error: The :class:`werkzeug.exceptions.HTTPException`
                 instance Flask passes positionally. Its ``code`` and
-                ``name`` attributes determine the response body.
+                ``name`` attributes determine the response body; its
+                attached response headers determine the preserved
+                header set.
         """
         status = error.code if error.code is not None else 500
         message = error.name if error.name else "HTTP Error"
-        return _make_error_response(status, message)
+        headers = _extract_preserved_headers(error)
+        return _make_error_response(status, message, extra_headers=headers)
 
 
 # ---------------------------------------------------------------------------

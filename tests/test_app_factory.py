@@ -81,9 +81,23 @@ References
 
 from __future__ import annotations
 
+import logging
+from typing import TYPE_CHECKING
+
 from flask import Flask
 
 from app import create_app
+from app.logging_config import _resolve_log_level
+
+if TYPE_CHECKING:
+    # ``pytest.MonkeyPatch`` is the typed return value of the
+    # function-scoped ``monkeypatch`` fixture pytest auto-injects when a
+    # test requests it by name. Gating the import behind
+    # ``TYPE_CHECKING`` keeps pytest's heavier symbols out of the runtime
+    # import graph while still giving mypy the symbol to validate the
+    # ``monkeypatch: pytest.MonkeyPatch`` parameter annotation used
+    # below.
+    import pytest
 
 # =============================================================================
 # 1. Flask instance contract
@@ -348,39 +362,221 @@ def test_create_app_with_invalid_config_falls_back_to_default() -> None:
 # 10. Logger configuration contract
 # =============================================================================
 # The factory calls :func:`app.logging_config.configure_logging` as
-# step 5 of the wiring sequence documented in ``app/__init__.py``. This
-# test confirms the resulting Flask application exposes a usable
-# logger via ``app.logger`` — Flask's per-app logger proxy — without
-# diving into the structural details of the logging configuration
-# (handler set, levels, formatters), which are exercised by integration
-# tests dedicated to :mod:`app.logging_config`.
+# step 5 of the wiring sequence documented in ``app/__init__.py``. The
+# Checkpoint 3 review flagged the prior single test for asserting only
+# that ``app.logger is not None`` and that it had ``info``/``error``
+# attributes — assertions that would PASS even if
+# ``configure_logging(app)`` were deleted from the factory, because
+# Flask creates a default logger as a side effect of constructing a
+# :class:`flask.Flask` instance.
+#
+# This section now contains TWO complementary tests that together lock
+# down the logger-configuration contract robustly:
+#
+# 1. :func:`test_create_app_logger_is_configured` asserts the CONCRETE
+#    side effects ``configure_logging`` produces — the logger level
+#    matches :func:`app.logging_config._resolve_log_level`, the
+#    factory-configured ``app`` named logger has at least one handler,
+#    and ``propagate`` is the dictConfig-mandated ``False``. Each of
+#    these differs from Flask's default-logger state (level
+#    ``WARNING`` (30), no application-attached handlers, ``propagate``
+#    inheriting Flask's default), so deleting the
+#    ``configure_logging(app)`` call from the factory would cause
+#    every assertion in this test to fail.
+#
+# 2. :func:`test_create_app_invokes_configure_logging` uses
+#    :class:`pytest.MonkeyPatch` to spy on :func:`configure_logging`
+#    and asserts the factory invokes it exactly once with the new
+#    :class:`flask.Flask` instance. This catches the regression where
+#    the configuration call is silently removed, even in a future
+#    world where Flask's default logger state happens to match the
+#    configured state.
+#
+# Together the two tests are belt-and-suspenders: side-effect
+# assertions catch silent-corruption regressions; the call-spy
+# assertion catches outright-removal regressions.
 
 
 def test_create_app_logger_is_configured() -> None:
-    """Verify ``create_app`` produces a Flask app with a usable logger.
+    """Verify ``create_app`` produces a configured logger (concrete side effects).
 
-    The factory's wiring sequence (``app/__init__.py``, step 5) calls
-    :func:`app.logging_config.configure_logging` to set up logging
-    before any other code path emits a log record. The Flask instance
-    exposes ``app.logger`` as the canonical per-application logger
-    proxy. This test verifies the logger attribute is present and
-    supports the standard :py:class:`logging.Logger` API.
+    Asserts the structural side effects produced by
+    :func:`app.logging_config.configure_logging` so the test FAILS if
+    that call is removed from the factory:
 
-    The test deliberately does NOT assert on the configured log level,
-    handlers, or formatter — those details belong in
-    integration-level tests for :mod:`app.logging_config`. Here we
-    only verify the factory wired the logger into a usable state.
+    1. ``app.logger`` exists and exposes the standard
+       :class:`logging.Logger` interface (``info``, ``error``,
+       ``exception``).
+    2. The application-namespace logger (``logging.getLogger('app')``)
+       has its level set to the value resolved from the ``LOG_LEVEL``
+       environment variable by :func:`app.logging_config._resolve_log_level`.
+       Flask's default is ``WARNING`` (30); after
+       :func:`configure_logging` the level matches the resolved level
+       (``INFO`` by default), so a mismatch indicates the dictConfig
+       payload did not apply.
+    3. The application-namespace logger has at least one handler
+       attached. ``configure_logging`` installs a
+       :class:`logging.StreamHandler` pointed at ``sys.stdout``;
+       Flask's default-logger setup attaches a stderr handler to the
+       Flask-app logger, not to the ``app`` named logger this
+       assertion inspects. A zero-length handler list therefore
+       indicates dictConfig did not run.
+    4. The application-namespace logger has ``propagate`` set to
+       :data:`False`. The Python logging defaults propagate to the
+       root logger; ``configure_logging`` explicitly sets
+       ``propagate=False`` on the ``app`` logger per the dictConfig
+       payload in :func:`app.logging_config._build_logging_config`.
+       The default :data:`True` value indicates dictConfig did not run.
+
+    Independent verification (anti-regression rationale):
+
+    The prior version of this test asserted only
+    ``app.logger is not None`` and that it had ``info``/``error``
+    attributes. That contract was satisfied by Flask's default logger
+    creation alone — the test would have PASSED with
+    ``configure_logging(app)`` deleted entirely from the factory. The
+    Checkpoint 3 review surfaced this gap explicitly; the new
+    assertions above each fail in that scenario, which the
+    complementary :func:`test_create_app_invokes_configure_logging`
+    test exercises directly via :class:`pytest.MonkeyPatch`.
     """
     app = create_app("testing")
-    assert app.logger is not None, "app.logger must be present"
-    # ``hasattr`` is preferred over ``isinstance(app.logger, Logger)``
-    # because Flask wraps the underlying logger in a proxy
-    # (``flask.app.Flask.logger`` is a cached property returning a
-    # :class:`logging.Logger` in current versions; this duck-typed
-    # check survives future internal refactors that swap in a proxy
-    # wrapper as long as the public method surface is preserved).
-    assert hasattr(app.logger, "info"), "app.logger must expose the standard Logger.info() API"
-    assert hasattr(app.logger, "error"), "app.logger must expose the standard Logger.error() API"
+
+    # ----- (1) Logger surface presence -----
+    assert app.logger is not None, "app.logger must be present after create_app"
+    assert hasattr(app.logger, "info"), "app.logger must expose Logger.info()"
+    assert hasattr(app.logger, "error"), "app.logger must expose Logger.error()"
+    assert hasattr(app.logger, "exception"), "app.logger must expose Logger.exception()"
+
+    # ----- (2) Effective level matches resolved LOG_LEVEL -----
+    # ``_resolve_log_level`` is the helper inside
+    # :mod:`app.logging_config` that reads + validates the
+    # ``LOG_LEVEL`` environment variable. Asserting equality of the
+    # numeric value against the resolved level guarantees the
+    # dictConfig payload was applied: Flask's default level is
+    # ``WARNING`` (30) which would never coincidentally match the
+    # ``INFO`` (20) default that ``_resolve_log_level`` returns.
+    resolved_level_name = _resolve_log_level()
+    expected_level = logging.getLevelName(resolved_level_name)
+    assert isinstance(expected_level, int), (
+        f"_resolve_log_level returned an unrecognised name {resolved_level_name!r}"
+    )
+    app_namespace_logger = logging.getLogger("app")
+    assert app_namespace_logger.level == expected_level, (
+        f"Expected app namespace logger level to match resolved "
+        f"LOG_LEVEL '{resolved_level_name}' ({expected_level}), got "
+        f"{logging.getLevelName(app_namespace_logger.level)} "
+        f"({app_namespace_logger.level}); did configure_logging run?"
+    )
+
+    # ----- (3) At least one handler is attached -----
+    # The dictConfig payload assigns the ``console`` handler to the
+    # ``app`` namespace logger; with no configuration, the named
+    # ``app`` logger has zero handlers (records propagate to the root
+    # logger via the default ``propagate=True``). An empty handler
+    # list therefore proves dictConfig did not run.
+    assert len(app_namespace_logger.handlers) > 0, (
+        "Expected the 'app' namespace logger to have at least one handler "
+        "attached by configure_logging; got an empty handler list, which "
+        "indicates the dictConfig payload did not apply (configure_logging "
+        "was not called or was overridden)."
+    )
+
+    # ----- (4) propagate is explicitly False -----
+    # The Python logging default is ``propagate=True``. The dictConfig
+    # payload in :func:`app.logging_config._build_logging_config`
+    # explicitly sets it to ``False`` on the ``app`` named logger so
+    # records are not double-emitted by the root logger's handlers.
+    # A ``True`` value here proves the dictConfig override did not run.
+    assert app_namespace_logger.propagate is False, (
+        f"Expected the 'app' namespace logger to have propagate=False "
+        f"(the dictConfig-configured value), got "
+        f"{app_namespace_logger.propagate!r}; did configure_logging run?"
+    )
+
+
+def test_create_app_invokes_configure_logging(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify ``create_app`` calls ``configure_logging`` exactly once.
+
+    Uses :meth:`pytest.MonkeyPatch.setattr` to install a spy in place of
+    :func:`app.logging_config.configure_logging` BEFORE the application
+    factory imports the symbol. Each invocation appends the positional
+    argument (the :class:`flask.Flask` instance) to a list so the test
+    can assert:
+
+    1. The factory invoked the spy at least once.
+    2. The factory invoked the spy exactly once per ``create_app``
+       call (catches the regression where the call is duplicated, e.g.
+       moved into a Blueprint registration step that runs per
+       Blueprint).
+    3. The argument received was the same Flask instance the factory
+       returned (catches the regression where the call is preserved
+       but moved to a stale module-level instance).
+
+    Why a separate test from :func:`test_create_app_logger_is_configured`:
+
+    The sibling test asserts the SIDE EFFECTS of ``configure_logging``
+    (level, handlers, propagate). Side-effect assertions can be
+    satisfied by other code paths in principle — for example, a future
+    refactor that moves logging setup into a Flask ``before_request``
+    hook would re-establish the side effects without
+    ``configure_logging`` ever running. This call-spy test asserts the
+    factory specifically invokes ``configure_logging``, which is the
+    exact behaviour the AAP §0.4.2 import graph and ``app/__init__.py``
+    docstring contract document. Belt and suspenders: silent corruption
+    is caught by the side-effect test; outright removal is caught here.
+
+    Args:
+        monkeypatch: pytest-supplied :class:`pytest.MonkeyPatch`
+            instance used to install the spy. The fixture
+            automatically tears down after the test returns, so the
+            real :func:`configure_logging` is restored before the next
+            test runs.
+    """
+    # The spy records every (positional_args, keyword_args) pair it
+    # was called with so the test can assert call count and the
+    # specific app instance passed in.
+    calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    def _spy(*args: object, **kwargs: object) -> None:
+        calls.append((args, kwargs))
+
+    # IMPORTANT: monkeypatch the symbol on :mod:`app`, not on
+    # :mod:`app.logging_config`. :func:`create_app` imports
+    # ``configure_logging`` at module load time via ``from
+    # app.logging_config import configure_logging``, which binds the
+    # name to :mod:`app`'s namespace. Patching the source module
+    # would not affect the already-bound reference inside :mod:`app`.
+    monkeypatch.setattr("app.configure_logging", _spy)
+
+    # Invoke the factory under spy. The spy is a no-op, so the
+    # resulting Flask app has Flask's default (un-configured) logger
+    # state — but that is fine for THIS test, whose only assertion
+    # surface is the call record below.
+    app = create_app("testing")
+
+    assert len(calls) == 1, (
+        f"Expected create_app to invoke configure_logging exactly once; "
+        f"got {len(calls)} invocation(s): {calls!r}"
+    )
+
+    # The factory's wiring contract is ``configure_logging(app)`` —
+    # one positional argument, no keyword arguments. Validating the
+    # positional argument count protects against a future refactor
+    # that calls ``configure_logging(app=app)`` (which would still
+    # work but signal the call shape drifted from the contract).
+    args, kwargs = calls[0]
+    assert kwargs == {}, (
+        f"Expected configure_logging to be called with no keyword arguments; got {kwargs!r}"
+    )
+    assert len(args) == 1, (
+        f"Expected configure_logging to be called with exactly one "
+        f"positional argument; got {len(args)}: {args!r}"
+    )
+    assert args[0] is app, (
+        "Expected configure_logging to receive the Flask instance "
+        "returned by create_app; got a different object."
+    )
 
 
 # =============================================================================

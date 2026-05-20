@@ -43,6 +43,18 @@ a configured :class:`flask.Flask` instance built via the application
 factory under the ``TestingConfig`` profile (``TESTING=True``), ensuring
 hermetic, order-independent test runs (AAP §0.6.7).
 
+Type-checking imports
+---------------------
+The :class:`flask.Flask` and :class:`flask.testing.FlaskClient` types
+are imported under a :data:`typing.TYPE_CHECKING` guard so they are
+available to static type-checkers (mypy) without being loaded at
+runtime. This is the checkpoint-prescribed pattern for fixture-only
+type annotations: pytest's parameter-injection mechanism does not
+introspect annotations at import time, so the types need not be
+present at runtime — but the annotations remain machine-readable for
+IDEs and type-checkers. The pattern mirrors the approach used in
+:mod:`tests.test_main`.
+
 Coverage summary
 ----------------
 This module verifies:
@@ -63,6 +75,9 @@ This module verifies:
    (:func:`test_health_blueprint_is_registered`).
 8. ``/healthz`` and ``/readyz`` are registered at the application root
    (:func:`test_health_routes_are_at_root_paths`).
+9. The health endpoints are GET-only: any non-GET method returns
+   HTTP 405 with a standards-compliant ``Allow`` header
+   (:func:`test_health_endpoints_methods_only_get`).
 
 References
 ----------
@@ -74,18 +89,33 @@ References
   independent of business-endpoint behaviour.
 * AAP §0.7.2 — Preservation rules (tests must remain portable when the
   Node.js source becomes available).
+* RFC 9110 §15.5.6 — ``Allow`` header REQUIRED on every 405 response.
 * :mod:`app.blueprints.health` — Blueprint package; ``health_bp`` is
   registered with ``url_prefix=None``.
 * :mod:`app.blueprints.health.routes` — handlers for ``healthz`` and
   ``readyz``.
+* :mod:`app.errors` — centralized error handlers that preserve
+  protocol headers on 405 responses.
 * :mod:`tests.conftest` — supplies the ``app`` and ``client`` fixtures
   used throughout this module.
 """
 
 from __future__ import annotations
 
-from flask import Flask
-from flask.testing import FlaskClient
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    # Imports gated by TYPE_CHECKING are evaluated by static type-checkers
+    # (mypy) but skipped at runtime — they exist solely to give pytest
+    # fixture parameters (``app: Flask``, ``client: FlaskClient``) typed
+    # annotations without forcing the costlier ``flask.testing`` import at
+    # test-collection time. ``from __future__ import annotations`` (above)
+    # makes ALL annotations strings at runtime, so these names need only
+    # resolve during static analysis. This is the checkpoint-prescribed
+    # pattern for fixture-only type annotations and mirrors the import
+    # block in :mod:`tests.test_main`.
+    from flask import Flask
+    from flask.testing import FlaskClient
 
 # =============================================================================
 # Tests for ``GET /healthz`` — liveness probe
@@ -295,3 +325,99 @@ def test_health_routes_are_at_root_paths(app: Flask) -> None:
     rules = {rule.rule for rule in app.url_map.iter_rules() if rule.endpoint.startswith("health.")}
     assert "/healthz" in rules, f"'/healthz' not found in health Blueprint rules: {sorted(rules)}"
     assert "/readyz" in rules, f"'/readyz' not found in health Blueprint rules: {sorted(rules)}"
+
+
+# =============================================================================
+# Method-not-allowed negative tests
+# =============================================================================
+# The two health endpoints are registered exclusively with ``@bp.get(...)``
+# decorators, so any non-GET request to them MUST receive HTTP 405 Method
+# Not Allowed. This negative test was explicitly required by the
+# Checkpoint 3 review:
+#
+#   "The checkpoint explicitly required a
+#   ``test_health_endpoints_methods_only_get`` negative test asserting
+#   ``POST /healthz`` returns 405."
+#
+# RFC 9110 §15.5.6 additionally REQUIRES every 405 response to carry an
+# ``Allow`` header listing the methods supported by the resource. The
+# centralized 405 handler in :mod:`app.errors` is responsible for
+# preserving that header from Werkzeug's response (the prior
+# implementation discarded it; the bug was fixed alongside this test
+# being introduced). Asserting both the status code and the ``Allow``
+# header value here therefore locks BOTH:
+#
+#   1. The route declaration (``@bp.get`` only).
+#   2. The error-handler header-preservation contract.
+#
+# A regression in either of those would surface in this single test.
+
+
+def test_health_endpoints_methods_only_get(client: FlaskClient) -> None:
+    """Verify the health endpoints accept GET only and return 405 otherwise.
+
+    The handlers in :mod:`app.blueprints.health.routes` are registered
+    via ``@health_bp.get(...)``, which is the Flask 2.0+
+    method-specific shorthand for ``@health_bp.route(..., methods=
+    ["GET"])``. Any non-GET request to ``/healthz`` or ``/readyz``
+    therefore MUST receive HTTP 405 Method Not Allowed.
+
+    Assertions per endpoint × non-GET method:
+
+    * Status is exactly 405 — the IANA-canonical code for
+      method-mismatch errors. A 404 would falsely imply the URL is
+      unknown; a 200 would indicate the handler erroneously accepts
+      the method.
+    * The ``Allow`` response header is non-empty and includes ``GET``
+      — required by RFC 9110 §15.5.6 so clients can discover the
+      supported method set. Werkzeug populates the ``Allow`` value
+      from Flask's URL map; the centralized 405 handler in
+      :mod:`app.errors` preserves the header on the JSON envelope
+      response (see the ``app/errors.py`` Checkpoint 3 fix).
+
+    Methods exercised: ``POST``, ``PUT``, ``DELETE``, ``PATCH`` — the
+    most common non-GET HTTP methods. ``OPTIONS`` and ``HEAD`` are
+    intentionally NOT tested as method-not-allowed cases: Flask
+    automatically adds ``OPTIONS`` to every route for CORS preflight
+    compatibility, and ``HEAD`` is auto-derived from ``GET`` handlers.
+    Both are therefore valid methods for ``/healthz`` and ``/readyz``
+    even though they are not explicitly declared.
+    """
+    # The endpoints under test and the non-GET methods that MUST be
+    # rejected. ``OPTIONS`` and ``HEAD`` are deliberately excluded —
+    # see the docstring rationale above.
+    endpoints = ["/healthz", "/readyz"]
+    forbidden_methods = ["POST", "PUT", "DELETE", "PATCH"]
+
+    for endpoint in endpoints:
+        for method in forbidden_methods:
+            response = client.open(endpoint, method=method)
+
+            # ----- Status assertion -----
+            assert response.status_code == 405, (
+                f"Expected 405 for {method} {endpoint}, got "
+                f"{response.status_code}; body="
+                f"{response.get_data(as_text=True)!r}"
+            )
+
+            # ----- Allow header preservation assertion -----
+            # The centralized 405 handler in :mod:`app.errors`
+            # preserves the ``Allow`` header from Werkzeug's
+            # canonical response. The header MUST be present and
+            # MUST contain ``GET`` (the handler's declared method).
+            # The order of methods in the header value is determined
+            # by Werkzeug and is not guaranteed to be alphabetical,
+            # so the assertion uses substring containment rather
+            # than exact equality.
+            allow_header = response.headers.get("Allow")
+            assert allow_header is not None, (
+                f"RFC 9110 §15.5.6 requires the Allow header on 405 "
+                f"responses; got no Allow header on {method} {endpoint}. "
+                f"This indicates the error handler discarded the header — "
+                f"see app/errors.py for the header-preservation contract."
+            )
+            assert "GET" in allow_header, (
+                f"Expected the Allow header on {method} {endpoint} to "
+                f"contain 'GET' (the route's declared method); got "
+                f"Allow={allow_header!r}"
+            )

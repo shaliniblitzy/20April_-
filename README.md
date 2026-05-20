@@ -249,13 +249,13 @@ The scaffold ships with the following placeholder routes. These are the
 endpoints that exist before the Node.js source is ported; ported endpoints
 will be added under `app/blueprints/api/routes.py`.
 
-| Method | Path        | Blueprint | Response                                                             |
-| ------ | ----------- | --------- | -------------------------------------------------------------------- |
-| `GET`  | `/`         | `main`    | Service banner JSON (name, version, status).                         |
-| `GET`  | `/version`  | `main`    | `{"name": ..., "version": ..., "python": ...}`                       |
-| `GET`  | `/healthz`  | `health`  | `{"status": "ok"}` — liveness probe.                                 |
-| `GET`  | `/readyz`   | `health`  | `{"status": "ready"}` — readiness probe.                             |
-| `GET`  | `/api/`     | `api`     | `501 Not Implemented` placeholder — replaced by the ported surface.  |
+| Method | Path        | Blueprint | Response                                                                                                  |
+| ------ | ----------- | --------- | --------------------------------------------------------------------------------------------------------- |
+| `GET`  | `/`         | `main`    | Service banner JSON: `{"service": ..., "message": ..., "endpoints": [...]}` (a list of helper paths).      |
+| `GET`  | `/version`  | `main`    | `{"name": ..., "version": ..., "python": ...}`                                                            |
+| `GET`  | `/healthz`  | `health`  | `{"status": "ok"}` — liveness probe.                                                                      |
+| `GET`  | `/readyz`   | `health`  | `{"status": "ready"}` — readiness probe.                                                                  |
+| `GET`  | `/api/`     | `api`     | `501 Not Implemented` placeholder — replaced by the ported surface.                                        |
 
 Once the Node.js source is supplied, its endpoints must be reproduced exactly
 (same method, path, request schema, response schema, and status codes) inside
@@ -266,7 +266,10 @@ Once the Node.js source is supplied, its endpoints must be reproduced exactly
 
 The test suite is built on `pytest` + `pytest-flask`. All tests run under the
 `TestingConfig` profile (with `TESTING=True`), and the application factory is
-invoked fresh per test session via the `app` fixture in `tests/conftest.py`.
+invoked fresh per test function via the function-scoped `app` fixture in
+`tests/conftest.py`. Each test therefore receives its own independent Flask
+instance, which guarantees order-independent execution and trivial
+parallelisation (e.g., under `pytest-xdist`).
 
 ```bash
 # Run the full suite.
@@ -279,7 +282,7 @@ pytest -v
 pytest tests/test_health.py
 
 # Run a single test function.
-pytest tests/test_health.py::test_healthz_returns_ok
+pytest tests/test_health.py::test_healthz_returns_200
 ```
 
 Fixtures provided by `tests/conftest.py`:

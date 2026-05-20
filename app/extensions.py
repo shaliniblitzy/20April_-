@@ -35,4 +35,15 @@ Node source is available. See AAP §0.5.3 for the Node→Python package
 equivalency mapping that will drive this file's contents during the port.
 """
 
+# `from __future__ import annotations` is included for consistency with the
+# rest of the `app/` package convention (see `app/__init__.py`,
+# `app/config.py`, `app/errors.py`, `app/logging_config.py`). While this
+# module currently contains only a module docstring and the ``__all__``
+# list — neither of which carry annotations that would benefit from
+# stringified evaluation — declaring the directive ensures that ANY future
+# extension singleton added here automatically participates in PEP 563
+# semantics without a future contributor having to remember to add it.
+# The directive is harmless at runtime for a module without annotations.
+from __future__ import annotations
+
 __all__: list[str] = []

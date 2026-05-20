@@ -81,6 +81,18 @@ This module verifies:
    redirect ultimately resolves to the 501 placeholder
    (:func:`test_api_root_without_trailing_slash_redirects`).
 
+Type-checking imports
+---------------------
+The :class:`flask.Flask` and :class:`flask.testing.FlaskClient` types
+are imported under a :data:`typing.TYPE_CHECKING` guard so they are
+available to static type-checkers (mypy) without being loaded at
+runtime. This is the checkpoint-prescribed pattern for fixture-only
+type annotations: pytest's parameter-injection mechanism does not
+introspect annotations at import time, so the types need not be
+present at runtime — but the annotations remain machine-readable for
+IDEs and type-checkers. The pattern mirrors the approach used in
+:mod:`tests.test_main`.
+
 References
 ----------
 * AAP §0.4.1 — Transformation table row for ``tests/test_api.py``:
@@ -105,8 +117,20 @@ References
 
 from __future__ import annotations
 
-from flask import Flask
-from flask.testing import FlaskClient
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    # Imports gated by TYPE_CHECKING are evaluated by static type-checkers
+    # (mypy) but skipped at runtime — they exist solely to give pytest
+    # fixture parameters (``app: Flask``, ``client: FlaskClient``) typed
+    # annotations without forcing the costlier ``flask.testing`` import at
+    # test-collection time. ``from __future__ import annotations`` (above)
+    # makes ALL annotations strings at runtime, so these names need only
+    # resolve during static analysis. This is the checkpoint-prescribed
+    # pattern for fixture-only type annotations and mirrors the import
+    # block in :mod:`tests.test_main`.
+    from flask import Flask
+    from flask.testing import FlaskClient
 
 # =============================================================================
 # Tests for ``GET /api/`` — placeholder endpoint contract
