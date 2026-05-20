@@ -1,0 +1,171 @@
+# =============================================================================
+# requirements-dev.txt
+# -----------------------------------------------------------------------------
+# Purpose : Pinned development and test dependencies for the Python 3 + Flask
+#           scaffold. This manifest is intended for local developer machines,
+#           continuous-integration runners, and pre-deployment quality gates;
+#           it is NEVER installed into the production runtime image.
+# Usage   : pip install -r requirements-dev.txt
+#           (or, equivalently, `pip install -e ".[dev]"` once the package is
+#           installable in editable mode via pyproject.toml.)
+# Python  : 3.10 or newer (effective minimum imposed by the runtime layer in
+#           requirements.txt; matches pyproject.toml's `requires-python`).
+#
+# Anchored by AAP §0.4.1 (transformation table row), §0.5.1 (key packages:
+# pytest, pytest-flask, ruff, mypy are the AAP-listed development dependencies),
+# and §0.6.7 (cross-cutting concerns — test isolation and code quality).
+#
+# Inheritance:
+#   - The very first non-comment line is `-r requirements.txt`. pip resolves
+#     this directive by recursively reading the referenced file, so a single
+#     `pip install -r requirements-dev.txt` provisions BOTH the runtime stack
+#     (Flask, gunicorn, python-dotenv) AND the development tooling below.
+#   - Keeping the inheritance directive at the top guarantees the runtime
+#     dependency closure is resolved first, which yields cleaner pip output
+#     and avoids surprising re-resolutions if dev tools share transitives
+#     with the runtime stack (e.g., click is used by Flask AND by pytest's
+#     entry-point machinery indirectly).
+#
+# Pinning strategy (AAP §0.5.1 specifies "latest stable" for dev tooling):
+#   - Exact pins (`==`) are used for EVERY development dependency below.
+#     This is a deliberate change from the earlier lower-bound (`>=`)
+#     posture; the exact-pin policy was mandated by the Checkpoint 3
+#     review for two compounding reasons:
+#
+#       (a) Reproducibility — a developer onboarding today and a CI
+#           runner six months from now must resolve byte-identical
+#           toolchains; lower bounds let patch and minor releases
+#           silently change the lint/format/test surface between
+#           installations, which breaks reproducibility of bug reports
+#           and CI verdicts.
+#
+#       (b) Security floor enforcement — pytest releases prior to
+#           9.0.3 are affected by CVE-2025-71176 / GHSA-6w46-j5rx-g56g.
+#           A `pytest>=8.0` lower bound would resolve to a vulnerable
+#           release inside the 8.x line; pinning `pytest==9.0.3`
+#           guarantees the patched release is installed.
+#
+#     The exact versions below match the validated development
+#     environment captured in the project's setup-status log and are
+#     mirrored byte-for-byte in `pyproject.toml`'s `[project.optional-
+#     dependencies].dev` array. Bumping any version requires updating
+#     BOTH files together to preserve the parity contract.
+#   - Tool configuration (rules, plugins, line length, target version) lives
+#     in `pyproject.toml` — see `[tool.ruff]`, `[tool.pytest.ini_options]`,
+#     and `[tool.mypy]`. This file declares only WHAT to install; HOW the
+#     tools run is configured in `pyproject.toml`.
+#
+# Mirror relationship with pyproject.toml:
+#   - The `[project.optional-dependencies].dev` array in pyproject.toml lists
+#     the exact same dependency set with the exact same version pins. This
+#     file additionally documents the pin rationale for each tool; the
+#     pyproject.toml block is a terser machine-consumed mirror.
+#   - Coverage tooling (`coverage[toml]`, `pytest-cov`) is included in
+#     BOTH files; it is part of the production-ready scaffold spirit
+#     articulated in AAP §0.1.2 and §0.6.7. Adding or removing any tool
+#     requires updating both manifests in lock-step.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Inheritance: pull in the full runtime stack from requirements.txt FIRST.
+# -----------------------------------------------------------------------------
+# This `-r` directive is intentionally the first non-comment line so that pip
+# resolves runtime dependencies (Flask, gunicorn, python-dotenv and their
+# transitives) before considering any dev tooling. Do not move this line.
+-r requirements.txt
+
+# -----------------------------------------------------------------------------
+# Testing
+# -----------------------------------------------------------------------------
+# pytest is the canonical Python test runner; pytest-flask layers Flask-aware
+# fixtures (`client`, `app`, `live_server`) that make integration-testing
+# Flask blueprints idiomatic.
+#
+# Security floor — pytest==9.0.3 is the lowest non-vulnerable release.
+# Versions prior to 9.0.3 are affected by CVE-2025-71176 /
+# GHSA-6w46-j5rx-g56g; the exact pin both satisfies the AAP §0.5.1
+# "latest stable" requirement AND enforces the patched security floor.
+# Do NOT relax this pin to a lower-bound (`>=`) without explicitly
+# acknowledging the CVE in the relaxation rationale.
+#
+# pytest-flask==1.3.0 is the most recent stable line; it provides the
+# `client` and `live_server` fixtures used across the `tests/` suite
+# without requiring any additional plugin entry-points. The exact pin
+# is mirrored in `pyproject.toml`'s `[project.optional-dependencies].dev`.
+#
+# Discovery and runtime behaviour is configured in `pyproject.toml` under
+# `[tool.pytest.ini_options]`.
+pytest==9.0.3
+pytest-flask==1.3.0
+
+# -----------------------------------------------------------------------------
+# Linting & Formatting
+# -----------------------------------------------------------------------------
+# ruff is a fast, all-in-one Python linter and formatter that subsumes the
+# functionality of flake8, isort, pyupgrade, and (largely) black. Rule set,
+# line length, target Python version, and per-file ignores live in
+# `pyproject.toml` under `[tool.ruff]` and `[tool.ruff.lint]`.
+#
+# Pinned to ruff==0.15.13 (the validated environment version captured in
+# the project's setup-status log). The exact pin guarantees reproducible
+# lint/format output: a lower-bound pin would silently introduce new rule
+# violations whenever a future ruff release added rules to the families
+# enumerated in `[tool.ruff.lint].select` (E, F, W, I, UP, B, C4, SIM).
+# The exact pin is mirrored in `pyproject.toml`'s `[project.optional-
+# dependencies].dev`.
+#
+# Invocation:
+#   ruff check .          # lint
+#   ruff check --fix .    # lint + autofix safe issues
+#   ruff format .         # format (replaces black + isort)
+ruff==0.15.13
+
+# -----------------------------------------------------------------------------
+# Type Checking (optional but recommended)
+# -----------------------------------------------------------------------------
+# mypy provides static type-checking. Per AAP §0.5.1 it is "optional but
+# recommended" — the scaffold's `[tool.mypy]` block in `pyproject.toml`
+# intentionally starts in a permissive posture (`disallow_untyped_defs = false`)
+# so the bare-bones scaffold passes type-checking before any view functions
+# are ported. Tighten the strictness once typed view-function signatures are
+# in place.
+#
+# Pinned to mypy==2.1.0 (the validated environment version captured in
+# the project's setup-status log). The exact pin guarantees reproducible
+# type-check verdicts: a lower-bound pin would silently introduce new
+# diagnostic codes or strictness defaults whenever a future mypy release
+# changed its behaviour. The exact pin is mirrored in `pyproject.toml`'s
+# `[project.optional-dependencies].dev`.
+#
+# Invocation:
+#   mypy .                # type-check the project
+mypy==2.1.0
+
+# -----------------------------------------------------------------------------
+# Coverage
+# -----------------------------------------------------------------------------
+# Code-coverage instrumentation. While AAP §0.5.1 does not list coverage
+# tooling explicitly, it is included here per the agent-prompt Phase 6
+# guidance ("default to including ... if its addition aligns with the spirit
+# of 'production-ready Flask scaffold' stated in AAP §0.1.2"). Test coverage
+# measurement is a baseline expectation of any production-ready scaffold and
+# is closely associated with the pytest ecosystem.
+#
+# Pinned to coverage[toml]==7.14.0 and pytest-cov==7.1.0 (the validated
+# environment versions captured in the project's setup-status log). The
+# `[toml]` extra is preserved on the `coverage` distribution so
+# `[tool.coverage.*]` configuration can be read directly from
+# `pyproject.toml` (no separate `.coveragerc` file required). The exact
+# pins are mirrored in `pyproject.toml`'s `[project.optional-
+# dependencies].dev`.
+#
+# `pytest-cov==7.1.0` is the pytest plugin that wires coverage measurement
+# into the pytest test-collection lifecycle; it adds `--cov`, `--cov-report`,
+# and related command-line options to pytest.
+#
+# Invocation:
+#   pytest --cov=app --cov-report=term-missing
+#   coverage report
+#   coverage html         # write HTML report to htmlcov/
+coverage[toml]==7.14.0
+pytest-cov==7.1.0
