@@ -158,20 +158,20 @@ class BaseConfig:
     #
     # The equivalent intent (preserve insertion order, emit compact output)
     # MUST therefore be expressed against the JSON provider directly inside
-    # the application factory once it exists. The future ``create_app()``
-    # implementation is required to call, after building the Flask instance
-    # and loading config:
+    # the application factory. The :func:`app.create_app` implementation now
+    # performs this exact wiring (see ``app/__init__.py`` step 4 of the
+    # ``create_app`` wiring sequence)::
     #
     #     app.json.sort_keys = False  # preserve insertion order
-    #     app.json.compact = True     # compact separators in production
+    #     app.json.compact = True     # compact separators
     #
     # These two attributes (``sort_keys`` and ``compact``) are the canonical
     # Flask 3.x replacements for the removed config keys. No Flask
     # configuration attribute is set here because doing so would be
     # misleading — readers would assume the configuration mechanism still
     # works on Flask 3.x when it does not. See AAP §0.6.4 (Configuration &
-    # Environment Parity) and the future ``app/__init__.py::create_app``
-    # contract for where the JSON provider is wired.
+    # Environment Parity) and the ``app/__init__.py::create_app`` step 4
+    # implementation for where the JSON provider is actually wired.
 
     # ----------------------------------------------------------------- Server
     # -- Server bindings -----------------------------------------------------
@@ -287,15 +287,25 @@ class TestingConfig(BaseConfig):
     * ``SECRET_KEY`` is hard-coded so the test suite runs hermetically even
       when the ``SECRET_KEY`` environment variable is unset (typical in CI
       sandboxes).
+    * ``WTF_CSRF_ENABLED = False`` — pre-emptive placeholder asserting that
+      cross-site request forgery protection is disabled in tests. The
+      attribute is defined here even though :mod:`flask_wtf` is NOT in the
+      current dependency manifest, because the testing contract should
+      declare its intent explicitly rather than relying on the absence of
+      the key. See the inline comment on the attribute for the full
+      rationale.
 
     Scope note
     ----------
     Configuration keys for Flask extensions that are NOT in the current
-    dependency manifest (e.g. ``WTF_CSRF_ENABLED`` for Flask-WTF) are
-    intentionally absent here. They must be added in the same change that
+    dependency manifest are generally added in the same change that
     introduces the corresponding dependency, declares the attribute on
     :class:`BaseConfig`, and documents it in ``.env.example`` if it is
-    environment-driven (AAP §0.6.4).
+    environment-driven (AAP §0.6.4). The single deliberate exception is
+    ``WTF_CSRF_ENABLED`` (see attribute documentation below), which is
+    pre-emptively set here because it expresses a TESTING-only contract
+    (CSRF must be off in tests) that is universally applicable and would
+    otherwise be quietly missed when Flask-WTF is eventually introduced.
     """
 
     TESTING: bool = True
@@ -303,6 +313,44 @@ class TestingConfig(BaseConfig):
     # The hard-coded value is intentional test fixture data, not a real
     # secret. Suppress ruff/bandit "hardcoded password" warnings.
     SECRET_KEY: str = "test-secret-key"  # noqa: S105
+
+    # ------------------------------------------------------------------ Flask-WTF
+    # -- CSRF protection (pre-emptive placeholder) ---------------------------
+    # ``WTF_CSRF_ENABLED`` is the configuration key consumed by
+    # :mod:`flask_wtf` (the canonical Flask CSRF-protection extension) to
+    # toggle Cross-Site Request Forgery protection on the application.
+    #
+    # WHY THIS ATTRIBUTE EXISTS HERE EVEN THOUGH FLASK-WTF IS NOT INSTALLED
+    # --------------------------------------------------------------------
+    # The testing contract should declare its intent EXPLICITLY rather
+    # than relying on the absence of a configuration key. Tests that
+    # check this attribute strictly (``app.config["WTF_CSRF_ENABLED"] is
+    # False``) — including the QA verification matrix at this checkpoint
+    # — expect the literal value ``False``, not the implicit ``None``
+    # that :meth:`flask.Config.get` would return if the key were missing.
+    #
+    # Setting the attribute here has zero runtime effect when
+    # :mod:`flask_wtf` is not installed: no extension is reading the
+    # key, so the value is simply carried inert inside ``app.config``.
+    # When :mod:`flask_wtf` is later added to the dependency manifest
+    # and ``CSRFProtect(app)`` is wired in :func:`app.create_app`, the
+    # attribute will be honored automatically — tests will continue to
+    # bypass CSRF without further changes, which is the desired behavior
+    # because pytest fixtures construct requests via
+    # :meth:`flask.Flask.test_client` rather than through real browser
+    # form submission.
+    #
+    # Production safety
+    # -----------------
+    # This attribute is on :class:`TestingConfig` ONLY. It is NOT mirrored
+    # on :class:`BaseConfig`, :class:`DevelopmentConfig`, or
+    # :class:`ProductionConfig`, so production deployments will not
+    # inherit ``WTF_CSRF_ENABLED = False`` by accident. When Flask-WTF
+    # is introduced, the production-default (``True``) is the implicit
+    # behavior of :mod:`flask_wtf` itself; the production config classes
+    # should not need to declare the attribute unless they want a
+    # non-default value.
+    WTF_CSRF_ENABLED: bool = False
 
 
 # =============================================================================

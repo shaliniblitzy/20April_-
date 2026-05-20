@@ -55,19 +55,26 @@ function body:
 2. Instantiate the :class:`flask.Flask` application object.
 3. Load the configuration class onto ``app.config`` via
    :meth:`flask.Config.from_object`.
-4. Configure process-wide logging via
+4. Configure the JSON provider behavior (``app.json.sort_keys = False``
+   and ``app.json.compact = True``) so :func:`flask.jsonify` preserves
+   insertion order and emits compact output per AAP §0.4.1. The
+   Flask 3.x JSON provider attribute API replaces the removed legacy
+   ``JSON_SORT_KEYS`` / ``JSONIFY_PRETTYPRINT_REGULAR`` config keys
+   (see :class:`app.config.BaseConfig` lines 142-174 for the full
+   rationale).
+5. Configure process-wide logging via
    :func:`app.logging_config.configure_logging` so subsequent log lines
    (including the startup confirmation below) honor ``LOG_LEVEL``.
-5. Register centralized HTTP error handlers via
+6. Register centralized HTTP error handlers via
    :func:`app.errors.register_error_handlers` so any error raised during
    the remaining steps (or during request handling) flows through the
    standard JSON envelope.
-6. Register the three Blueprints: :data:`app.blueprints.health.health_bp`,
+7. Register the three Blueprints: :data:`app.blueprints.health.health_bp`,
    :data:`app.blueprints.main.main_bp`, and
    :data:`app.blueprints.api.api_bp`.
-7. Emit a single ``INFO``-level startup line so operators see positive
+8. Emit a single ``INFO``-level startup line so operators see positive
    evidence that the factory ran end-to-end.
-8. Return the configured :class:`flask.Flask` instance.
+9. Return the configured :class:`flask.Flask` instance.
 
 Public API
 ----------
@@ -98,7 +105,7 @@ imported below. Adding a new Flask extension (e.g. ``SQLAlchemy``,
 1. Declaring the extension singleton in :mod:`app.extensions`.
 2. Adding a single ``extension.init_app(app)`` call inside
    :func:`create_app` between the configuration load (step 3) and the
-   Blueprint registration (step 6) — the canonical Flask extension
+   Blueprint registration (step 7) — the canonical Flask extension
    wiring contract.
 
 References
@@ -127,6 +134,17 @@ from __future__ import annotations
 # honored.
 import os
 
+# ``typing.cast`` is imported to satisfy static type-checkers (mypy) when
+# the application factory configures the concrete
+# :class:`flask.json.provider.DefaultJSONProvider` attributes
+# (``sort_keys``, ``compact``) on ``app.json``. Flask's :class:`Flask`
+# class types ``app.json`` as the abstract :class:`JSONProvider` base —
+# which intentionally does NOT declare those configuration attributes
+# — so a runtime-free :func:`typing.cast` is needed to inform mypy that
+# the concrete default provider is in use. See the comment block at the
+# call site (step 4 in :func:`create_app`) for the full rationale.
+from typing import cast
+
 # ---------------------------------------------------------------------------
 # Third-party
 # ---------------------------------------------------------------------------
@@ -137,6 +155,13 @@ import os
 # instance constructed below. This keeps the module's import footprint
 # minimal and the dependency on Flask explicit.
 from flask import Flask
+
+# The concrete :class:`JSONProvider` subclass that Flask uses by default.
+# Imported solely so :func:`typing.cast` can express the type assertion
+# applied to ``app.json`` inside the application factory; the import is
+# free at runtime (the symbol is referenced only inside a ``cast(...)``
+# call which is erased by Python's type system).
+from flask.json.provider import DefaultJSONProvider
 
 # =============================================================================
 # Module-level constants — DEFINED BEFORE BLUEPRINT IMPORTS
@@ -357,7 +382,68 @@ def create_app(config_name: str | None = None) -> Flask:
     app.config.from_object(config_by_name[config_name])
 
     # ------------------------------------------------------------------
-    # 4. Configure process-wide logging
+    # 4. Configure JSON provider behavior
+    # ------------------------------------------------------------------
+    # AAP §0.4.1 (transformation row for ``app/config.py``) mandates two
+    # JSON-serialization behaviors for the scaffold's wire contract:
+    #
+    #   * Preserve insertion order of dict keys — operators and clients
+    #     consuming the service-identity envelopes (``GET /``,
+    #     ``GET /version``, ``GET /api/``) expect keys to appear in the
+    #     order the handler declared them (e.g. ``["service", "message",
+    #     "endpoints"]``), not alphabetically sorted.
+    #   * Emit compact JSON (no extra whitespace) so response bodies are
+    #     deterministic byte-for-byte across DEBUG/non-DEBUG modes; this
+    #     keeps ``Content-Length`` predictable and makes byte-level
+    #     contract assertions stable in test and monitoring tooling.
+    #
+    # Implementation note — Flask 3.x JSON provider API
+    # -------------------------------------------------
+    # The legacy ``JSON_SORT_KEYS`` and ``JSONIFY_PRETTYPRINT_REGULAR``
+    # Flask configuration keys were REMOVED in Flask 2.3 and continue to
+    # have no runtime effect in Flask 3.1.3. The behaviors are now
+    # controlled by attributes on the application's
+    # :class:`flask.json.provider.JSONProvider` instance (``app.json``),
+    # which has different defaults:
+    #
+    #   * ``app.json.sort_keys`` — defaults to ``True`` (alphabetical
+    #     sort). Setting to ``False`` preserves the dict's insertion
+    #     order, matching the contract documented in AAP §0.4.1 and the
+    #     handler source code under :mod:`app.blueprints.main.routes`
+    #     and :mod:`app.blueprints.api.routes`.
+    #   * ``app.json.compact`` — defaults to ``None`` which resolves to
+    #     ``True`` (compact) in non-DEBUG mode and ``False``
+    #     (pretty-printed with indent=2, newlines) in DEBUG mode.
+    #     Setting to ``True`` explicitly forces compact output in BOTH
+    #     modes so the byte-level wire contract is identical regardless
+    #     of the active configuration profile.
+    #
+    # See :class:`app.config.BaseConfig` (lines 142-174) for the
+    # original analysis that flagged the Flask 3.x replacement attributes
+    # and prescribed this exact fix. Setting these attributes here in
+    # the application factory — AFTER configuration is loaded but BEFORE
+    # any blueprint is registered — is the canonical wiring point so
+    # every handler registered downstream observes the same JSON
+    # serialization behavior.
+    #
+    # Type-checking note
+    # ------------------
+    # :attr:`flask.Flask.json` is typed as the abstract
+    # :class:`flask.json.provider.JSONProvider`, which intentionally
+    # does NOT declare the ``sort_keys`` / ``compact`` configuration
+    # attributes — they live on the concrete
+    # :class:`flask.json.provider.DefaultJSONProvider` subclass that
+    # Flask instantiates by default. The :func:`typing.cast` below is a
+    # runtime-free assertion that informs mypy of the concrete type;
+    # if a future change replaces the JSON provider with a custom
+    # implementation that lacks these attributes, this cast must be
+    # revisited.
+    json_provider = cast(DefaultJSONProvider, app.json)
+    json_provider.sort_keys = False
+    json_provider.compact = True
+
+    # ------------------------------------------------------------------
+    # 5. Configure process-wide logging
     # ------------------------------------------------------------------
     # Called BEFORE any other code path that might log so the startup
     # line at the end of this function (and every subsequent
@@ -368,7 +454,7 @@ def create_app(config_name: str | None = None) -> Flask:
     configure_logging(app)
 
     # ------------------------------------------------------------------
-    # 5. Register centralized HTTP error handlers
+    # 6. Register centralized HTTP error handlers
     # ------------------------------------------------------------------
     # Called BEFORE Blueprint registration so that any error raised
     # during Blueprint registration (a code-level bug, not a
@@ -380,7 +466,7 @@ def create_app(config_name: str | None = None) -> Flask:
     register_error_handlers(app)
 
     # ------------------------------------------------------------------
-    # 6. Register Blueprints
+    # 7. Register Blueprints
     # ------------------------------------------------------------------
     # Each Blueprint is registered explicitly (no loop) so the
     # registration intent is unambiguous to static analysers and the
@@ -403,7 +489,7 @@ def create_app(config_name: str | None = None) -> Flask:
     app.register_blueprint(api_bp)
 
     # ------------------------------------------------------------------
-    # 7. Emit startup confirmation log line
+    # 8. Emit startup confirmation log line
     # ------------------------------------------------------------------
     # Operators rely on this line as positive evidence that the factory
     # completed end-to-end. The ``%s``-style formatting (rather than
@@ -419,7 +505,7 @@ def create_app(config_name: str | None = None) -> Flask:
     )
 
     # ------------------------------------------------------------------
-    # 8. Return the configured instance
+    # 9. Return the configured instance
     # ------------------------------------------------------------------
     # The returned object is consumed by:
     #   * :mod:`wsgi` (production) — assigns to ``app = create_app()``
