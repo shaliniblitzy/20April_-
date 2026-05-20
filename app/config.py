@@ -141,37 +141,105 @@ class BaseConfig:
 
     # ------------------------------------------------------------------ JSON
     # -- JSON behaviour ------------------------------------------------------
-    # NOTE: Flask 3.x removed the legacy ``JSON_SORT_KEYS`` and
+    # The two class attributes below — ``JSON_SORT_KEYS = False`` and
+    # ``JSONIFY_PRETTYPRINT_REGULAR = False`` — are declared because AAP
+    # §0.4.1 (transformation table row for ``app/config.py``) literally
+    # mandates them. They are carried inside ``app.config`` after
+    # ``app.config.from_object(BaseConfig)`` runs and are visible to any
+    # test, audit, or operator that inspects ``app.config[...]``.
+    #
+    # IMPORTANT — these keys are NO-OPS on Flask 3.x at runtime
+    # ----------------------------------------------------------
+    # Flask 2.3 removed the legacy ``JSON_SORT_KEYS`` and
     # ``JSONIFY_PRETTYPRINT_REGULAR`` configuration keys; in Flask 3.1.3
-    # ``app.config.from_object(...)`` silently copies them into ``app.config``
-    # but they are no-ops — ``flask.jsonify`` reads its behaviour from the
-    # active :class:`flask.json.provider.JSONProvider` instance attached to
-    # the application (``app.json``), NOT from ``app.config``.
+    # ``app.config.from_object(...)`` silently copies them into
+    # ``app.config`` but :func:`flask.jsonify` IGNORES them — it reads its
+    # behaviour from the active
+    # :class:`flask.json.provider.JSONProvider` instance attached to the
+    # application (``app.json``), NOT from ``app.config``.
     #
     # Empirically verified on Flask 3.1.3:
     #
     #     app = Flask(__name__)
     #     app.config.from_mapping(JSON_SORT_KEYS=False)
     #     # app.config['JSON_SORT_KEYS'] == False, but...
-    #     # app.json.sort_keys is still True, and
+    #     # app.json.sort_keys is still True (the default), and
     #     # jsonify({'b': 1, 'a': 2}) still emits {"a":2,"b":1}.
     #
     # The equivalent intent (preserve insertion order, emit compact output)
-    # MUST therefore be expressed against the JSON provider directly inside
-    # the application factory. The :func:`app.create_app` implementation now
-    # performs this exact wiring (see ``app/__init__.py`` step 4 of the
+    # is therefore expressed against the JSON provider directly inside the
+    # application factory. The :func:`app.create_app` implementation
+    # performs this wiring (see ``app/__init__.py`` step 4 of the
     # ``create_app`` wiring sequence)::
     #
     #     app.json.sort_keys = False  # preserve insertion order
     #     app.json.compact = True     # compact separators
     #
-    # These two attributes (``sort_keys`` and ``compact``) are the canonical
-    # Flask 3.x replacements for the removed config keys. No Flask
-    # configuration attribute is set here because doing so would be
-    # misleading — readers would assume the configuration mechanism still
-    # works on Flask 3.x when it does not. See AAP §0.6.4 (Configuration &
-    # Environment Parity) and the ``app/__init__.py::create_app`` step 4
-    # implementation for where the JSON provider is actually wired.
+    # These two attributes (``sort_keys`` and ``compact``) on the
+    # :class:`flask.json.provider.DefaultJSONProvider` are the canonical
+    # Flask 3.x replacements for the removed config keys and are where
+    # the runtime JSON-serialization contract is actually enforced.
+    #
+    # Why declare the legacy keys here anyway
+    # ---------------------------------------
+    # 1. **AAP §0.4.1 literal compliance** — the AAP transformation table
+    #    enumerates these two keys as required BaseConfig attributes. The
+    #    refactor flavour mandates literal compliance with AAP §0.4.1
+    #    unless an explicit deviation is approved. Declaring them as
+    #    no-op markers satisfies the literal contract without sacrificing
+    #    the Flask 3.x correctness of the actual JSON wiring.
+    # 2. **Explicit-intent declaration** — readers (and downstream
+    #    porting agents) seeing these keys in ``app.config`` immediately
+    #    understand the original intent (unsorted, compact JSON) without
+    #    having to dig into the application factory for the
+    #    ``app.json.*`` wiring.
+    # 3. **Forward-compatibility hook** — if a future Flask version
+    #    reintroduces these keys (or a custom JSON provider chooses to
+    #    consult ``app.config`` for them), the markers are already in
+    #    place and the runtime behaviour requires no change.
+    # 4. **Zero runtime risk** — Flask 3.1.3's
+    #    :meth:`flask.Config.from_object` simply copies them into the
+    #    dict; no extension, no internal Flask code, and no test reads
+    #    them with side effects. Setting them is inert.
+    #
+    # See AAP §0.6.4 (Configuration & Environment Parity) and the
+    # ``app/__init__.py::create_app`` step 4 implementation for where the
+    # JSON provider is actually wired.
+    JSON_SORT_KEYS: bool = False
+    """Legacy Flask config key — NO-OP on Flask 3.x.
+
+    Declared as ``False`` to satisfy AAP §0.4.1 literal compliance and to
+    make the original intent (preserve insertion order in JSON
+    serialization) explicit when an operator or test inspects
+    ``app.config["JSON_SORT_KEYS"]``.
+
+    The real runtime behaviour is enforced by
+    ``app.json.sort_keys = False`` inside :func:`app.create_app` (step 4
+    of the factory wiring sequence), because Flask 2.3 removed this key
+    from the supported configuration surface and Flask 3.1.3's
+    :func:`flask.jsonify` reads its sort behaviour exclusively from
+    :attr:`flask.Flask.json` (the active
+    :class:`flask.json.provider.JSONProvider`). See the comment block
+    above this attribute for the full Flask-3.x deprecation analysis.
+    """
+
+    JSONIFY_PRETTYPRINT_REGULAR: bool = False
+    """Legacy Flask config key — NO-OP on Flask 3.x.
+
+    Declared as ``False`` to satisfy AAP §0.4.1 literal compliance and to
+    make the original intent (emit compact JSON without extra whitespace)
+    explicit when an operator or test inspects
+    ``app.config["JSONIFY_PRETTYPRINT_REGULAR"]``.
+
+    The real runtime behaviour is enforced by ``app.json.compact = True``
+    inside :func:`app.create_app` (step 4 of the factory wiring
+    sequence), because Flask 2.3 removed this key from the supported
+    configuration surface and Flask 3.1.3's :func:`flask.jsonify` reads
+    its pretty-print behaviour exclusively from :attr:`flask.Flask.json`
+    (the active :class:`flask.json.provider.JSONProvider`). See the
+    comment block above the ``JSON_SORT_KEYS`` attribute for the full
+    Flask-3.x deprecation analysis.
+    """
 
     # ----------------------------------------------------------------- Server
     # -- Server bindings -----------------------------------------------------
